@@ -4,3 +4,7 @@ scripts/current.pine
 temp_*
 *.log
 discovery-log.json
+
+# Sauvegardes locales des fichiers patches (l historique git fait foi)
+*.orig
+PR_BODY.md

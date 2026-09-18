@@ -1,65 +1,84 @@
 {
-  "watchlist": ["BTCUSDT"],
-  "default_timeframe": "1",
+  "_a_lire": "Ce fichier remplace la strategie demo livree avec le depot (scalper 10 secondes, sans stop loss), qui perdait de l'argent par construction a cause des frais. Les regles ci-dessous sont les DEFAUTS appliques pendant la session du 17/09/2026 - ce ne sont pas tes regles personnelles. Relis chaque ligne et ajuste.",
+
+  "watchlist": [
+    "BINANCE:BTCUSDT",
+    "BINANCE:ETHUSDT",
+    "TVC:GOLD",
+    "TVC:USOIL",
+    "FX:EURUSD",
+    "TVC:SPX"
+  ],
+  "_watchlist_note": "Sous-ensemble de ta watchlist TradingView (18 symboles). Chaque symbole ajoute allonge le brief d'environ 20 secondes, le temps de charger et VERIFIER la resolution.",
+
+  "default_timeframe": "240",
 
   "strategy": {
-    "name": "10-Second Momentum Scalper",
-    "sources": [
-      "Price momentum — buy if last close > previous close (green candle)",
-      "RSI filter — only trade when RSI is not at an extreme (30–70 range)"
-    ],
-    "primary_timeframes": [
-      "1-minute (signal source)",
-      "10-second execution loop"
-    ]
+    "name": "Swing multi-timeframe",
+    "principe": "Prendre position dans le sens de la tendance de fond, sur un repli, quand les petites unites de temps confirment la reprise.",
+    "timeframes": {
+      "D": "tendance de fond - definit le biais autorise",
+      "240": "structure - definit les niveaux d'entree et de sortie",
+      "60": "declencheur - confirme le moment d'entree"
+    },
+    "horizon": "Plusieurs heures a plusieurs jours. Voir _pourquoi_pas_de_scalping."
   },
 
+  "_pourquoi_pas_de_scalping": "Mesure faite sur BTC le 18/09/2026 : mouvement net moyen sur 3 minutes = 29 points, frais aller-retour a 0,2% = 153 points. Il faut capter 5,2x le mouvement moyen juste pour rentrer dans ses frais. En 4H l'objectif vise depasse 3000 points et les frais tombent a 5% de l'objectif. C'est la seule raison pour laquelle ces regles visent le swing.",
+
   "indicators": {
-    "rsi_14": "Momentum filter. Only trade when RSI is between 30–70 (avoid extremes).",
-    "price_momentum": "Compare last close vs previous close. Up = long signal. Down = short signal."
+    "ema20_ema50": "Structure court terme. Prix au-dessus des deux = acheteurs en controle.",
+    "ema200": "Tendance de fond. ATTENTION : demande beaucoup d'historique. L'outil analysis_snapshot signale quand elle est calculee sur trop peu de bougies.",
+    "rsi14": "Momentum. Sous 30 = survendu, au-dessus de 70 = surachete. Ne jamais l'utiliser seul.",
+    "atr14": "Volatilite. Sert a dimensionner le stop : un stop a moins de 1 ATR se fait sortir par le bruit."
   },
 
   "bias_criteria": {
-    "bullish": [
-      "Last 1-min candle closed higher than the one before it",
-      "RSI is between 30 and 70"
+    "haussier": [
+      "Prix au-dessus de l'EMA50 daily (tendance de fond intacte)",
+      "Prix au-dessus des EMA20 et EMA50 en 1H (reprise confirmee)",
+      "RSI daily sous 40 apres un repli = point d'entree, pas un signal de vente"
     ],
-    "bearish": [
-      "Last 1-min candle closed lower than the one before it",
-      "RSI is between 30 and 70"
+    "baissier": [
+      "Prix sous l'EMA50 daily",
+      "Prix sous les EMA20 et EMA50 en 1H",
+      "RSI daily au-dessus de 60 apres une hausse"
     ],
-    "neutral": [
-      "RSI is above 70 (overbought — skip)",
-      "RSI is below 30 (oversold — skip)",
-      "Candle close change is less than 0.05% (chop — skip)"
+    "neutre": [
+      "Prix coince entre EMA20 et EMA50 sans direction",
+      "Signaux contradictoires entre daily et 4H",
+      "Volume sous la moyenne sur la cassure = ne pas suivre"
     ]
   },
 
-  "entry_rules": {
-    "long": [
-      "Last close > previous close by at least 0.05%",
-      "RSI between 30 and 70",
-      "Enter market buy immediately"
-    ],
-    "short": [
-      "Last close < previous close by at least 0.05%",
-      "RSI between 30 and 70",
-      "Enter market sell immediately"
-    ]
-  },
+  "entry_rules": [
+    "Le biais daily et le declencheur 1H doivent aller dans le meme sens. Sinon, pas de trade.",
+    "Ne jamais entrer sans savoir ou est le stop AVANT de passer l'ordre.",
+    "Ratio gain/risque minimum 2 pour 1. En dessous, le trade ne vaut pas la peine.",
+    "Pas d'entree juste sous une resistance majeure : verifier la place disponible jusqu'a l'objectif."
+  ],
 
   "exit_rules": [
-    "Exit automatically after 10 seconds (next loop tick closes previous position)",
-    "No manual exit management — pure time-based scalp"
+    "Stop loss place a l'entree, systematiquement, dans le meme ordre que l'entree.",
+    "Stop sous le plus bas des 20 dernieres periodes (au-dessus du plus haut pour un short), avec une marge pour le bruit.",
+    "Objectif au plus haut/bas des 20 periodes en 4H, la ou le prix a deja reagi.",
+    "Sortie anticipee si la structure casse avant le stop : cloture 1H au-dela du niveau structurel."
   ],
 
   "risk_rules": [
-    "Fixed trade size: 1% of portfolio per trade",
-    "Maximum trade size: $3.00",
-    "Maximum 6 trades per 60-second run",
-    "No stop loss — exit is time-based at next tick",
-    "For demo purposes only — minimum BitGet order size may apply"
+    "Risque maximum 1% du capital par trade.",
+    "Risque total simultane maximum 3% du capital.",
+    "ATTENTION CORRELATION : BTC et ETH bougent ensemble. Deux positions long crypto = UN seul pari, pas deux. Compter leur risque comme un seul.",
+    "Aucune position sans stop loss, jamais.",
+    "Ne pas deplacer un stop pour eviter d'etre sorti. Le deplacer uniquement dans le sens du gain.",
+    "Verifier le levier : le compte est a 10x par defaut. Le stop, pas le levier, definit le risque reel."
   ],
 
-  "notes": "Demo strategy for YouTube video. Runs 6 trades over 60 seconds, one every 10 seconds. Signal is simple price momentum on 1-min candles with RSI sanity check."
+  "_a_completer_par_toi": [
+    "Quel capital risques-tu reellement par trade ? Le defaut 1% est prudent mais c'est TON choix.",
+    "Quels marches veux-tu suivre en priorite ? La watchlist ci-dessus est un point de depart.",
+    "As-tu des horaires de trading ? Rien ici ne filtre les heures creuses, alors que la liquidite nocturne fausse les signaux."
+  ],
+
+  "notes": "Verifier avec trading_get_account que chaque position ouverte a bien un stop avant de fermer la session. Les alertes posees encadrent les niveaux d'invalidation."
 }

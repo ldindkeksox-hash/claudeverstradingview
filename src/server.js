@@ -14,6 +14,8 @@ import { registerWatchlistTools } from "./tools/watchlist.js";
 import { registerUiTools } from "./tools/ui.js";
 import { registerPaneTools } from "./tools/pane.js";
 import { registerTabTools } from "./tools/tab.js";
+import { registerTradingTools } from "./tools/trading.js";
+import { registerAnalysisTools } from "./tools/analysis.js";
 import { registerMorningTools } from "./tools/morning.js";
 
 const server = new McpServer(
@@ -84,6 +86,8 @@ registerReplayTools(server);
 registerIndicatorTools(server);
 registerWatchlistTools(server);
 registerUiTools(server);
+registerTradingTools(server);
+registerAnalysisTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 registerMorningTools(server);

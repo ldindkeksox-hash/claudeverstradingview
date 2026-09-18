@@ -41,6 +41,25 @@ function loadRules(rulesPath) {
   );
 }
 
+// A symbol change takes seconds to load; a fixed sleep reads the PREVIOUS
+// symbol’s price. Wait until the chart actually reports the symbol asked for.
+async function waitForSymbol(symbol, timeoutMs = 20000) {
+  const wanted = String(symbol).split(":").pop().toUpperCase();
+  const deadline = Date.now() + timeoutMs;
+  let seen = null;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 700));
+    try {
+      const st = await chart.getState();
+      seen = st && st.symbol;
+      // Exact match on the ticker segment: indexOf() would accept "BTCUSD"
+      // while the chart still shows "BTCUSDT", i.e. the wrong instrument.
+      if (seen && String(seen).split(":").pop().toUpperCase() === wanted) return { ok: true, symbol: seen };
+    } catch (e) { /* chart still loading */ }
+  }
+  return { ok: false, symbol: seen };
+}
+
 export async function runBrief({ rules_path } = {}) {
   const { rules, path: loadedFrom } = loadRules(rules_path);
   const { watchlist = [], default_timeframe = "240" } = rules;
@@ -64,9 +83,16 @@ export async function runBrief({ rules_path } = {}) {
   for (const symbol of watchlist) {
     try {
       await chart.setSymbol({ symbol });
-      await new Promise((r) => setTimeout(r, 900));
-      await chart.setTimeframe({ timeframe: default_timeframe });
-      await new Promise((r) => setTimeout(r, 900));
+      const loaded = await waitForSymbol(symbol);
+      if (!loaded.ok) {
+        results.push({ symbol, error: "Symbol never loaded (chart still shows " + loaded.symbol + "). Values skipped rather than reported wrong." });
+        continue;
+      }
+      const tf = await chart.setTimeframe({ timeframe: default_timeframe });
+      if (tf && tf.verified === false) {
+        results.push({ symbol, error: "Timeframe " + default_timeframe + " could not be verified: " + (tf.error || "stale bars") });
+        continue;
+      }
 
       const [state, indicators, quote] = await Promise.all([
         chart.getState(),
@@ -76,6 +102,7 @@ export async function runBrief({ rules_path } = {}) {
 
       results.push({
         symbol,
+        resolved_symbol: loaded.symbol,
         timeframe: default_timeframe,
         state,
         indicators,

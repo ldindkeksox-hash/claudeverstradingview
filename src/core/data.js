@@ -2,6 +2,7 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
+import { resolutionSeconds, spacingStats, spacingMatches } from './chart.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -59,6 +60,49 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
   `;
 }
 
+// The chart can report one resolution while still holding bars of another, so
+// callers are told what the bars ACTUALLY are rather than what was asked for.
+//
+// The spacing is taken across the whole run, never from the last pair: that gap
+// is the one most likely to straddle a weekend or a session break, and flagging
+// fresh data as stale every Monday would turn the warning into noise — which is
+// exactly how the original silent-stale-data bug would slip back in.
+async function resolutionCheck(bars) {
+  if (!bars || bars.length < 3) {
+    return { verified: false, reason: 'not_enough_bars',
+      note: 'Fewer than 3 bars loaded: spacing cannot be measured.' };
+  }
+  const stats = spacingStats(bars.map(b => b.time));
+  const declared = await evaluate(`
+    (function() { try { return String(window.TradingViewApi._activeChartWidgetWV.value().resolution()); }
+      catch (e) { return null; } })()
+  `);
+  const expected = declared ? resolutionSeconds(declared) : null;
+  const matches = spacingMatches(stats, expected);
+
+  const out = {
+    verified: matches === true,
+    bar_spacing_s: stats ? stats.median : null,     // typical gap, session breaks excluded
+    min_spacing_s: stats ? stats.min : null,
+    last_gap_s: bars[bars.length - 1].time - bars[bars.length - 2].time,
+    chart_resolution: declared,
+    expected_spacing_s: expected,
+  };
+
+  if (matches === null) {
+    // Unverifiable is NOT the same as wrong — say which one it is.
+    out.reason = declared == null ? 'resolution_unreadable' : 'resolution_not_measurable';
+    out.note = declared == null
+      ? 'The chart resolution could not be read, so these bars could not be checked. They may still be correct.'
+      : 'Resolution "' + declared + '" has no fixed bar length (monthly or unparseable), so these bars could not be checked. They may still be correct.';
+  } else if (matches === false) {
+    out.reason = 'stale_data';
+    out.warning = 'STALE DATA: chart says ' + declared + ' (' + expected + 's per bar) but the bars are typically '
+      + stats.median + 's apart (smallest gap ' + stats.min + 's). Reload the timeframe before trusting these values.';
+  }
+
+  return out;
+}
 export async function getOhlcv({ count, summary } = {}) {
   const limit = Math.min(count || 100, MAX_OHLCV_BARS);
   let data;
@@ -90,8 +134,10 @@ export async function getOhlcv({ count, summary } = {}) {
     const volumes = bars.map(b => b.volume);
     const first = bars[0];
     const last = bars[bars.length - 1];
+    const check = await resolutionCheck(bars);
     return {
       success: true, bar_count: bars.length,
+      resolution_check: check,
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
@@ -103,7 +149,8 @@ export async function getOhlcv({ count, summary } = {}) {
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  const check = await resolutionCheck(data.bars);
+  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, resolution_check: check, bars: data.bars };
 }
 
 export async function getIndicator({ entity_id }) {

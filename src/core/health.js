@@ -4,6 +4,8 @@
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
+import { join } from 'path';
+import { homedir } from 'os';
 
 export async function healthCheck() {
   await getClient();
@@ -207,11 +209,47 @@ export async function launch({ port, kill_existing } = {}) {
     } catch { /* ignore */ }
   }
 
+  // Fallback: TradingView Desktop unusable (e.g. MSIX/Store install, which cannot accept
+  // --remote-debugging-port). Drive tradingview.com in a Chromium browser instead —
+  // findChartTarget() matches purely on URL, so a browser tab behaves identically.
+  let browserMode = false;
+  let launchArgs = [`--remote-debugging-port=${cdpPort}`];
+
   if (!tvPath) {
-    throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
+    const browserMap = {
+      win32: [
+        `${process.env['PROGRAMFILES(X86)']}/Google/Chrome/Application/chrome.exe`,
+        `${process.env.PROGRAMFILES}/Google/Chrome/Application/chrome.exe`,
+        `${process.env.LOCALAPPDATA}/Google/Chrome/Application/chrome.exe`,
+        `${process.env['PROGRAMFILES(X86)']}/Microsoft/Edge/Application/msedge.exe`,
+        `${process.env.PROGRAMFILES}/Microsoft/Edge/Application/msedge.exe`,
+      ],
+      darwin: [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      ],
+      linux: ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'],
+    };
+    for (const b of (browserMap[platform] || browserMap.linux)) {
+      if (b && existsSync(b)) { tvPath = b; browserMode = true; break; }
+    }
+    if (browserMode) {
+      const profileDir = process.env.TV_DEBUG_PROFILE || join(homedir(), '.tv-debug-profile');
+      launchArgs = [
+        `--remote-debugging-port=${cdpPort}`,
+        `--user-data-dir=${profileDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        'https://www.tradingview.com/chart/',
+      ];
+    }
   }
 
-  if (killFirst) {
+  if (!tvPath) {
+    throw new Error(`Neither TradingView Desktop nor a Chromium browser found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
+  }
+
+  if (killFirst && !browserMode) {
     try {
       if (platform === 'win32') execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
       else execSync('pkill -f TradingView', { timeout: 5000 });
@@ -219,7 +257,7 @@ export async function launch({ port, kill_existing } = {}) {
     } catch { /* may not be running */ }
   }
 
-  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
+  const child = spawn(tvPath, launchArgs, { detached: true, stdio: 'ignore' });
   child.unref();
 
   for (let i = 0; i < 15; i++) {
@@ -236,7 +274,7 @@ export async function launch({ port, kill_existing } = {}) {
       if (ready) {
         const info = JSON.parse(ready);
         return {
-          success: true, platform, binary: tvPath, pid: child.pid,
+          success: true, platform, binary: tvPath, browser_mode: browserMode, pid: child.pid,
           cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
           browser: info.Browser, user_agent: info['User-Agent'],
         };

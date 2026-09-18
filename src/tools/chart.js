@@ -15,10 +15,11 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_timeframe', 'Change the chart timeframe/resolution', {
+  server.tool('chart_set_timeframe', 'Change the chart timeframe and PROVE the series reloaded. Returns verified:true only once real bar spacing matches the requested resolution; falls back to a page reload if setResolution leaves stale bars behind.', {
     timeframe: z.string().describe('Timeframe (e.g., 1, 5, 15, 60, D, W, M)'),
-  }, async ({ timeframe }) => {
-    try { return jsonResult(await core.setTimeframe({ timeframe })); }
+    timeout_ms: z.coerce.number().optional().describe('How long to wait for the series to reload before falling back to a page reload. Default 25000.'),
+  }, async ({ timeframe, timeout_ms }) => {
+    try { return jsonResult(await core.setTimeframe({ timeframe, timeout_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

@@ -42,15 +42,164 @@ export async function setSymbol({ symbol }) {
   return { success: true, symbol, chart_ready: ready };
 }
 
-export async function setTimeframe({ timeframe }) {
+// Seconds per bar for each resolution TradingView accepts.
+// Seconds per bar for each resolution TradingView accepts:
+// "30S" seconds, "15" minutes (bare number), "2D" days, "3W" weeks.
+// Calendar months vary in length, so "M" has no fixed answer.
+export function resolutionSeconds(tf) {
+  const s = String(tf == null ? '' : tf).trim().toUpperCase();
+  const m = s.match(/^(\d*)([SDWM]?)$/);
+  if (!m) return null;
+  if (m[1] === '' && m[2] === '') return null;   // empty / whitespace is not a resolution
+  const n = m[1] === '' ? 1 : Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (m[2] === 'S') return n;
+  if (m[2] === 'D') return n * 86400;
+  if (m[2] === 'W') return n * 604800;
+  if (m[2] === 'M') return null;          // calendar month — not a fixed span
+  if (m[2] === '') return n * 60;         // bare number means minutes
+  return null;
+}
+
+// Whether a resolution can be checked by bar spacing at all. Distinguishes
+// "verification impossible" (monthly, unparseable) from "verified false".
+export function isVerifiableResolution(tf) {
+  return resolutionSeconds(tf) != null;
+}
+
+/**
+ * Typical spacing across a run of bars.
+ *
+ * Never use the last pair alone: that gap is the one most likely to straddle a
+ * weekend, a session break or a holiday, which would flag perfectly fresh data
+ * as stale. A session break can only ENLARGE a gap, never shrink it — so the
+ * median and the smallest gap both survive it. A wrong resolution, by contrast,
+ * shifts every gap at once, so it still gets caught.
+ */
+export function spacingStats(times) {
+  const gaps = [];
+  for (let i = 1; i < times.length; i++) {
+    const d = times[i] - times[i - 1];
+    if (d > 0) gaps.push(d);
+  }
+  if (!gaps.length) return null;
+  gaps.sort((a, b) => a - b);
+  return { median: gaps[Math.floor(gaps.length / 2)], min: gaps[0], samples: gaps.length };
+}
+
+export function spacingMatches(stats, expected) {
+  if (stats == null || expected == null) return null;
+  return Math.abs(stats.median - expected) < 2 || Math.abs(stats.min - expected) < 2;
+}
+
+// Spacing statistics over the bars currently loaded on the chart.
+async function barSpacing() {
+  const times = await evaluate(`
+    (function() {
+      try {
+        var b = window.TradingViewApi._activeChartWidgetWV.value()
+          ._chartWidget.model().mainSeries().bars();
+        var e = b.lastIndex(), s = Math.max(b.firstIndex(), e - 60);
+        var out = [];
+        for (var i = s; i <= e; i++) { var v = b.valueAt(i); if (v) out.push(v[0]); }
+        return out;
+      } catch (err) { return null; }
+    })()
+  `);
+  return Array.isArray(times) && times.length >= 2 ? spacingStats(times) : null;
+}
+
+/**
+ * Set the chart resolution and PROVE the data actually reloaded.
+ *
+ * chart.setResolution() updates the resolution property and the toolbar while
+ * leaving the previous resolution's bars in place, so data_get_ohlcv silently
+ * returns bars of the wrong timeframe. Every read here is therefore validated
+ * against real bar spacing, and a reload through the URL is used as a fallback.
+ */
+export async function setTimeframe({ timeframe, timeout_ms }) {
+  const expected = resolutionSeconds(timeframe);
+  const budget = Number(timeout_ms) > 0 ? Number(timeout_ms) : 25000;
+  let measured = null;
+
   await evaluate(`
     (function() {
       var chart = ${CHART_API};
-      chart.setResolution('${timeframe.replace(/'/g, "\\'")}', {});
+      chart.setResolution(${JSON.stringify(String(timeframe))}, {});
     })()
   `);
-  const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+
+  // null = cannot be checked by spacing (monthly, or an unparseable resolution)
+  const matches = async () => {
+    if (expected == null) return null;
+    measured = await barSpacing();
+    return spacingMatches(measured, expected);
+  };
+
+  const deadline = Date.now() + budget;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1500));
+    const ok = await matches();
+    if (ok === null) break;
+    if (ok) {
+      return {
+        success: true, timeframe, verified: true, method: 'setResolution',
+        expected_spacing_s: expected,
+        bar_spacing_s: measured ? measured.median : null,   // measured, not assumed
+        min_spacing_s: measured ? measured.min : null,
+      };
+    }
+  }
+
+  if (expected == null) {
+    return {
+      success: true, timeframe, verified: false, method: 'setResolution',
+      note: String(timeframe).toUpperCase().indexOf('M') >= 0
+        ? 'Monthly bars have no fixed length, so the resolution cannot be confirmed by bar spacing. Values may still be correct.'
+        : 'Resolution "' + timeframe + '" could not be parsed, so it cannot be confirmed by bar spacing. Values may still be correct.',
+    };
+  }
+
+  // Fallback: a real page load at the requested interval.
+  const symbol = await evaluate(`
+    (function() { try { return ${CHART_API}.symbol(); } catch (e) { return null; } })()
+  `);
+  if (!symbol) {
+    return { success: false, timeframe, verified: false,
+      error: 'Resolution did not reload and the symbol could not be read for a fallback reload.' };
+  }
+
+  await evaluate(`
+    (function() {
+      location.href = 'https://www.tradingview.com/chart/?symbol='
+        + encodeURIComponent(${JSON.stringify(symbol)}) + '&interval='
+        + encodeURIComponent(${JSON.stringify(String(timeframe))});
+      return true;
+    })()
+  `);
+
+  const reloadDeadline = Date.now() + 45000;
+  while (Date.now() < reloadDeadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      if (await matches()) {
+        return {
+          success: true, timeframe, verified: true, method: 'page_reload', symbol,
+          expected_spacing_s: expected,
+          bar_spacing_s: measured ? measured.median : null,
+          min_spacing_s: measured ? measured.min : null,
+          warning: 'setResolution did not reload the series, so the page was reloaded. Indicators, drawings and the saved layout are gone from the chart.',
+        };
+      }
+    } catch (e) { /* page is navigating */ }
+  }
+
+  return {
+    success: false, timeframe, verified: false,
+    expected_spacing_s: expected,
+    bar_spacing_s: measured ? measured.median : null,
+    error: 'Timeframe did not load after both setResolution and a page reload. Data currently on the chart is NOT at the requested resolution. A page reload was attempted, so the chart may also have lost its layout.',
+  };
 }
 
 export async function setType({ chart_type }) {
