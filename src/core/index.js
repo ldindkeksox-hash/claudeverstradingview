@@ -17,3 +17,8 @@ export * as ui from './ui.js';
 export * as trading from './trading.js';
 export * as analysis from './analysis.js';
 export * as market from './market.js';
+export * as positioning from './positioning.js';
+export * as orderbook from './orderbook.js';
+export * as strength from './strength.js';
+export * as regime from './regime.js';
+export * as levels from './levels.js';
