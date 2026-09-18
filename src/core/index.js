@@ -16,3 +16,4 @@ export * as indicators from './indicators.js';
 export * as ui from './ui.js';
 export * as trading from './trading.js';
 export * as analysis from './analysis.js';
+export * as market from './market.js';
