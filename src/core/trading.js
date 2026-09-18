@@ -219,17 +219,28 @@ export async function closePosition({ symbol, confirm }) {
 
 // --- Session audit -----------------------------------------------------------
 
+// Correlation families. Listing coins by name is a trap: any coin missing from
+// the list silently reads as uncorrelated, which UNDERSTATES concentration - the
+// one error an exposure check must never make. Crypto is therefore matched on the
+// EXCHANGE first, which catches every pair traded there, with the coin list kept
+// only as a fallback for symbols carrying no exchange prefix.
+const CRYPTO_EXCHANGES = ['BINANCE', 'COINBASE', 'BITSTAMP', 'KRAKEN', 'BYBIT', 'OKX', 'BITFINEX', 'KUCOIN', 'GATEIO', 'MEXC', 'HUOBI', 'CRYPTO', 'BITGET'];
+
 const CORRELATION_GROUPS = [
-  { name: 'crypto', match: ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE', 'ADA'] },
-  { name: 'metaux', match: ['GOLD', 'XAU', 'SILVER', 'XAG'] },
-  { name: 'petrole', match: ['USOIL', 'UKOIL', 'BRENT', 'WTI', 'CL1'] },
-  { name: 'indices_us', match: ['SPX', 'NDX', 'DJI', 'ES1', 'NQ1'] },
+  { name: 'crypto', match: ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE', 'ADA', 'LINK', 'AVAX', 'DOT', 'MATIC', 'LTC', 'TRX', 'SHIB', 'UNI', 'ATOM', 'NEAR', 'APT', 'ARB', 'OP', 'SUI', 'TON', 'USDT', 'USDC'] },
+  { name: 'metaux', match: ['GOLD', 'XAU', 'SILVER', 'XAG', 'PLATINUM', 'XPT'] },
+  { name: 'petrole', match: ['USOIL', 'UKOIL', 'BRENT', 'WTI', 'CL1', 'NATGAS'] },
+  { name: 'indices_us', match: ['SPX', 'NDX', 'DJI', 'ES1', 'NQ1', 'US500', 'US100', 'RUT'] },
+  { name: 'indices_eu', match: ['CAC40', 'DEU30', 'DAX', 'UK100', 'STOXX', 'EU50'] },
 ];
 
 function groupOf(symbol) {
-  const s = String(symbol).toUpperCase();
+  const raw = String(symbol).toUpperCase();
+  const exchange = raw.indexOf(':') >= 0 ? raw.split(':')[0] : '';
+  if (exchange && CRYPTO_EXCHANGES.some(x => exchange.indexOf(x) >= 0)) return 'crypto';
+  const ticker = raw.split(':').pop();
   for (const g of CORRELATION_GROUPS) {
-    if (g.match.some(m => s.indexOf(m) >= 0)) return g.name;
+    if (g.match.some(m => ticker.indexOf(m) >= 0)) return g.name;
   }
   return null;
 }
