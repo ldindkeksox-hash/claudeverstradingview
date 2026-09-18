@@ -191,7 +191,18 @@ function trendOf(y) {
   }
   const r2 = sst > 0 ? 1 - sse / sst : null;
   const se = n > 2 && sse > 0 ? Math.sqrt((sse / (n - 2)) / sxx) : null;
-  return { slope, r2, tstat: se ? slope / se : null, samples: n };
+
+  // Drift test on the first differences (the log returns), which are ~i.i.d.
+  const d = [];
+  for (let i = 1; i < n; i++) d.push(y[i] - y[i - 1]);
+  let tDrift = null;
+  if (d.length >= 5) {
+    const md = d.reduce((a, b) => a + b, 0) / d.length;
+    const varD = d.reduce((a, b) => a + (b - md) ** 2, 0) / (d.length - 1);
+    const sdD = Math.sqrt(varD);
+    if (sdD > 0) tDrift = md / (sdD / Math.sqrt(d.length));
+  }
+  return { slope, r2, tstat_ols: se ? slope / se : null, tstat: tDrift, samples: n, returns_used: d.length };
 }
 
 function maxDrawdown(closes) {
@@ -326,13 +337,15 @@ export async function relativeStrength({ symbol, benchmark, interval, periods, m
     tendance = { valeur: null, raison: 'fenetre de tendance trop courte (' + tw + ' bougies)' };
   } else {
     const perPeriodPct = (Math.exp(tr.slope) - 1) * 100;
-    const significatif = tr.tstat != null && Math.abs(tr.tstat) >= 2;
+    const significatif = tr.tstat != null && Math.abs(tr.tstat) >= 2;   // drift t-stat on returns
     tendance = {
       fenetre: tw,
       pente_pct_par_periode: round(perPeriodPct, 3),
       pente_pct_sur_fenetre: round((Math.exp(tr.slope * tw) - 1) * 100, 2),
       r2: round(tr.r2, 3),
       t_stat: round(tr.tstat, 2),
+      t_stat_methode: "t de la derive moyenne des rendements du ratio sur " + (tr.returns_used || 0) + " points. La pente OLS du niveau logarithmique n est PAS testable ainsi: log(ratio) est une marche aleatoire, ses residus sont autocorreles et son t explose (78 % de faux positifs mesures).",
+      t_stat_ols_niveau: round(tr.tstat_ols, 2),
       significatif,
       verdict: !significatif ? 'pas de tendance nette (pente non significative)'
         : perPeriodPct > 0 ? 'ratio en hausse: surperformance en cours'
@@ -438,13 +451,23 @@ export async function relativeStrength({ symbol, benchmark, interval, periods, m
   const regime = perfBenchWindow == null ? null
     : perfBenchWindow > 5 ? 'reference en hausse'
       : perfBenchWindow < -5 ? 'reference en baisse' : 'reference plate';
-  const rsUp = variation[30] != null ? variation[30] > 0 : (variation[7] != null ? variation[7] > 0 : null);
+  // Same window as perfSymWindow: the ratio end-to-end, not its last 30 bars.
+  const rsUp = ratio.length >= 2 && ratio[0] > 0 ? ratio[ratio.length - 1] > ratio[0] : null;
+  const rsRecent = variation[30] != null ? variation[30] > 0 : (variation[7] != null ? variation[7] > 0 : null);
+  const rsDivergence = rsUp != null && rsRecent != null && rsUp !== rsRecent;
   let lecture = null;
+  // Both quantities below span the full window, stated so the reader can check.
   if (perfSymWindow != null && rsUp != null) {
     if (perfSymWindow > 0 && rsUp) lecture = 'monte ET surperforme la reference: leadership, c est le cas le plus solide.';
     else if (perfSymWindow > 0 && !rsUp) lecture = 'monte mais moins vite que la reference: force apparente en prix, faiblesse relative. Detenir la reference aurait mieux paye.';
     else if (perfSymWindow <= 0 && rsUp) lecture = 'baisse moins que la reference: resistance relative, souvent le premier signe d une rotation.';
     else lecture = 'baisse ET sous-performe: faiblesse confirmee sur les deux plans.';
+  }
+  // A verdict over the window and a move over 30 bars can point opposite ways;
+  // saying so is the difference between a reading and a contradiction.
+  if (lecture && rsDivergence) {
+    lecture += ' ATTENTION: sur les 30 dernieres periodes le ratio va dans l AUTRE sens (' +
+      (rsRecent ? 'redressement recent' : 'essoufflement recent') + '). La phrase ci-dessus porte sur toute la fenetre.';
   }
 
   // --- scored verdict, each component visible -------------------------------
@@ -644,7 +667,9 @@ export async function correlationMatrix({ symbols, interval, periods, seuil }) {
   const N = names.length;
   // Effective number of independent bets for an equally weighted basket.
   const denom = rhoAvg == null ? null : 1 + (N - 1) * rhoAvg;
-  const nEff = denom != null && denom > 0 ? N / denom : null;
+  const nEffRaw = denom != null && denom > 0 ? N / denom : null;
+  const nEff = nEffRaw == null ? null : Math.min(N, Math.max(1, nEffRaw));
+  const nEffSature = nEffRaw != null && (nEffRaw > N || nEffRaw < 1);
 
   if (!rel.fiable) {
     avertissements.push('Correlations calculees sur ' + points + ' points (' + rel.niveau + '). En dessous de ' + OK_RETURNS + ' points, une correlation ne vaut pratiquement rien: elle bouge de 0.2 en changeant quelques bougies.');
@@ -685,6 +710,10 @@ export async function correlationMatrix({ symbols, interval, periods, seuil }) {
       correlation_moyenne_globale: round(rhoAvg, 3),
       actifs_independants_effectifs: round(nEff, 2),
       actifs_reels: N,
+      valeur_brute_non_bornee: nEffSature ? round(nEffRaw, 2) : undefined,
+      borne: nEffSature
+        ? "Formule saturee: N/(1+(N-1)*rho) diverge quand rho approche -1/(N-1). Valeur ramenee entre 1 et le nombre d actifs. A cette taille d echantillon le chiffre n est pas exploitable."
+        : undefined,
       lecture: nEff == null ? null
         : 'Un panier equipondere de ces ' + N + ' actifs se comporte comme ' + round(nEff, 1) + ' pari(s) reellement independant(s).',
     },
