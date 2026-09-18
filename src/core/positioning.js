@@ -223,7 +223,7 @@ export async function positioning({ symbol, period } = {}) {
   // capped at the endpoint's own limit of 500.
   const statLimit = clamp(Math.ceil(WINDOW_H / perH) + 6, 30, 500);
 
-  const [tick, prem, fundHist, oiNow, oiHist, lsHist, takerHist, kl] = await Promise.all([
+  const [tick, prem, fundHist, oiNow, oiHist, lsHist, takerHist, kl, tickPerp] = await Promise.all([
     getJson(SPOT + '/api/v3/ticker/24hr?symbol=' + sym, 'ticker_24h'),
     getJson(FAPI + '/fapi/v1/premiumIndex?symbol=' + sym, 'funding_courant'),
     getJson(FAPI + '/fapi/v1/fundingRate?symbol=' + sym + '&limit=30', 'funding_historique'),
@@ -232,6 +232,7 @@ export async function positioning({ symbol, period } = {}) {
     getJson(FAPI + '/futures/data/globalLongShortAccountRatio?symbol=' + sym + '&period=' + per + '&limit=' + statLimit, 'ratio_long_short'),
     getJson(FAPI + '/futures/data/takerlongshortRatio?symbol=' + sym + '&period=' + per + '&limit=' + statLimit, 'ratio_taker'),
     getJson(SPOT + '/api/v3/klines?symbol=' + sym + '&interval=1h&limit=200', 'klines_1h'),
+    getJson(FAPI + '/fapi/v1/ticker/24hr?symbol=' + sym, 'ticker_perp_24h'),
   ]);
 
   const calls = [tick, prem, fundHist, oiNow, oiHist, lsHist, takerHist, kl];
@@ -274,6 +275,7 @@ export async function positioning({ symbol, period } = {}) {
   const oiRows = oiHist.ok ? asc(oiHist.data, 'timestamp') : [];
   let oi = null;
   let windowStartTs = now - WINDOW_H * 3600000;
+  let windowEndTs = now;          // both legs must end at the same instant
   let windowH = null;
 
   if (oiRows.length >= 2) {
@@ -283,6 +285,7 @@ export async function positioning({ symbol, period } = {}) {
     const refTs = ref ? num(ref.timestamp) : null;
     windowH = refTs != null ? (lastTs - refTs) / 3600000 : null;
     if (refTs != null) windowStartTs = refTs;
+    windowEndTs = lastTs;
 
     const coinsNow = num(last.sumOpenInterest);
     const coinsRef = ref ? num(ref.sumOpenInterest) : null;
@@ -328,9 +331,11 @@ export async function positioning({ symbol, period } = {}) {
 
   // Price move over exactly the window the OI delta was measured on.
   const priceThen = priceAt(windowStartTs);
-  const priceNow = bars.length ? bars[bars.length - 1].close : spotLast;
+  const priceAtEnd = priceAt(windowEndTs);
+  const priceNow = priceAtEnd != null ? priceAtEnd : (bars.length ? bars[bars.length - 1].close : spotLast);
   const pricePct = pctChange(priceNow, priceThen);
-  const windowUsedH = windowH != null ? windowH : (priceThen != null ? WINDOW_H : null);
+  const windowUsedH = (windowEndTs - windowStartTs) / 3600000;
+  const priceLagH = (now - windowEndTs) / 3600000;
 
   const prix = {
     spot: r(spotLast, 6),
@@ -338,6 +343,9 @@ export async function positioning({ symbol, period } = {}) {
     base_perp_vs_spot_pct: markPrice != null && spotLast ? r(((markPrice - spotLast) / spotLast) * 100, 4) : null,
     variation_fenetre_pct: r(pricePct, 2),
     fenetre_h: r(windowUsedH, 2),
+    fenetre_utc: { du: new Date(windowStartTs).toISOString(), au: new Date(windowEndTs).toISOString() },
+    retard_h: r(priceLagH, 2),
+    note_alignement: 'Mesure close sur la meme fenetre que l open interest. retard_h = temps ecoule depuis la fin de cette fenetre, non inclus dans la variation.',
     reference_utilisee: r(priceThen, 6),
     samples: bars.length,
     raison: pricePct == null
@@ -394,7 +402,7 @@ export async function positioning({ symbol, period } = {}) {
     qui_paye: currentRate == null ? null : (currentRate > 0 ? 'les longs payent les shorts' : currentRate < 0 ? 'les shorts payent les longs' : 'aucun transfert'),
     lecture: fundingVerdict(annualCurrent),
     lecture_moyenne: annualAvg == null ? null : fundingVerdict(annualAvg),
-    reference: 'Taux de repos Binance = ' + (FUNDING_BASELINE_PER_INTERVAL * 100).toFixed(2) + ' % par intervalle, soit ' + r(FUNDING_BASELINE_PER_INTERVAL * perYear * 100, 1) + ' % annualise. C est le zero pratique, pas 0.',
+    reference: 'Taux de repos Binance = ' + (FUNDING_BASELINE_PER_INTERVAL * (intervalH / 8) * 100).toFixed(4) + ' % par intervalle de ' + intervalH + ' h, soit ' + r(FUNDING_BASELINE_PER_INTERVAL * ((365 * 24) / 8) * 100, 2) + ' % annualise. Le repos est invariant en annualise: seule son expression par intervalle change. C est le zero pratique, pas 0.',
   };
   if (currentRate == null) funding.raison = prem.ok ? 'champ lastFundingRate absent de la reponse' : 'premiumIndex indisponible: ' + prem.error;
   if (avgRate == null) funding.raison_moyenne = fundHist.ok
@@ -559,21 +567,32 @@ export async function positioning({ symbol, period } = {}) {
 
   // Leverage relative to real activity: a large OI against a thin 24h volume is
   // a crowded, illiquid book, which is what turns a normal dip into a cascade.
-  const quoteVol = tick.ok ? num(tick.data.quoteVolume) : null;
+  // Perpetual volume, to match the perpetual open interest in the numerator.
+  const perpVol = tickPerp.ok ? num(tickPerp.data.quoteVolume) : null;
+  const spotVol = tick.ok ? num(tick.data.quoteVolume) : null;
+  const quoteVol = perpVol;
   const oiNotional = oi && oi.notionnel_usd != null
     ? oi.notionnel_usd
     : (oi && oi.contrats_actuels != null && markPrice != null ? oi.contrats_actuels * markPrice : null);
-  if (quoteVol && oiNotional != null) {
+  if (!perpVol && oiNotional != null) {
+    croisement.levier_vs_activite = {
+      ratio_oi_sur_volume: null,
+      raison: 'volume perpetuel 24h indisponible' + (tickPerp.ok ? '' : ': ' + tickPerp.error) + '. Le volume spot ne peut pas le remplacer: sur Binance le perpetuel traite 5 a 11 fois le spot, le ratio serait gonfle d autant.',
+      oi_notionnel_usd: r(oiNotional, 0),
+      volume_spot_24h_usd: r(spotVol, 0),
+    };
+  } else if (quoteVol && oiNotional != null) {
     croisement.levier_vs_activite = {
       oi_notionnel_usd: r(oiNotional, 0),
-      volume_spot_24h_usd: r(quoteVol, 0),
+      volume_perp_24h_usd: r(perpVol, 0),
+      volume_spot_24h_usd: r(spotVol, 0),
       ratio_oi_sur_volume: r(oiNotional / quoteVol, 2),
       lecture: (oiNotional / quoteVol) >= 3
         ? 'Positions ouvertes tres lourdes face au volume echange: livre encombre, une purge se propage vite'
         : (oiNotional / quoteVol) >= 1
           ? 'Positions ouvertes comparables au volume 24h: encombrement normal'
           : 'Positions ouvertes legeres face au volume: marche liquide par rapport au levier en place',
-      note: 'Volume spot Binance uniquement, l OI est perpetuel: c est un ordre de grandeur, pas un ratio exact.',
+      note: 'OI perpetuel rapporte au volume PERPETUEL 24h, les deux sur le meme marche. Le volume spot est donne a titre indicatif.',
     };
   } else {
     croisement.levier_vs_activite = {
@@ -647,7 +666,7 @@ export async function positioning({ symbol, period } = {}) {
   // deliberately excluded: it says how much conviction, never which side.
   const axes = [];
   if (annualCurrent != null) {
-    const baselineAnnual = FUNDING_BASELINE_PER_INTERVAL * perYear * 100;
+    const baselineAnnual = FUNDING_BASELINE_PER_INTERVAL * ((365 * 24) / 8) * 100;
     axes.push({ nom: 'funding', score: clamp(((annualCurrent - baselineAnnual) / 40) * 100, -100, 100) });
   }
   if (longShort.part_longs != null) {
