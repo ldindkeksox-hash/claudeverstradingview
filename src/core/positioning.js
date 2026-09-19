@@ -139,13 +139,18 @@ function percentileRank(xs, v) {
 // Axis readings
 // ---------------------------------------------------------------------------
 
+// Bands never straddle zero: the label must agree with who is actually paying.
+// The resting rate is 10.95%/year, so "at rest" is centred there, not on zero.
 function fundingVerdict(annualPct) {
   if (annualPct == null) return null;
   if (annualPct >= 50) return 'surchauffe haussiere: les longs payent cher, purge probable sur repli';
   if (annualPct >= 25) return 'penchant long marque: les longs payent nettement';
-  if (annualPct >= 12) return 'legerement long, cout supportable';
-  if (annualPct > 5) return 'neutre, proche du taux de repos';
-  if (annualPct > -10) return 'legerement short: les shorts commencent a payer';
+  if (annualPct > 15) return 'legerement long: les longs payent un peu plus que le repos';
+  if (annualPct >= 7) return 'au repos: les longs payent le taux de base, aucun penchant';
+  if (annualPct > 0) return 'sous le repos: les longs payent, mais moins que la normale';
+  if (annualPct === 0) return 'aucun transfert entre longs et shorts';
+  if (annualPct > -12) return 'negatif: ce sont les SHORTS qui payent, penchant baissier leger';
+  if (annualPct > -25) return 'penchant short marque: les shorts payent nettement';
   return 'shorts sous pression: ils payent cher, carburant a short squeeze';
 }
 
@@ -700,7 +705,12 @@ export async function positioning({ symbol, period } = {}) {
   const synthese = {
     biais_de_la_foule: biais,
     score_directionnel: score == null ? null : r(score, 1),
-    echelle_score: 'de -100 (foule entierement short) a +100 (foule entierement long). Au-dela de +/-40 le positionnement devient un risque en soi.',
+    echelle_score: 'de -100 a +100, moyenne des axes disponibles. L axe long/short sature a +100 des 70 % de comptes longs et a -100 des 30 % (echelle: 50 % = 0, chaque 20 points d ecart = 100). L axe funding sature a +/-100 a 40 points de pourcentage annualises de part et d autre du repos (10.95 %/an). Au-dela de +/-40 le positionnement devient un risque en soi.',
+    axes_pris_en_compte: axes.length,
+    axes_attendus: 3,
+    note_score: axes.length < 3
+      ? 'Score moyenne sur ' + axes.length + ' axe(s) sur 3: un axe manquant deplace le resultat, voir detail_axes.'
+      : undefined,
     encombrement: score == null ? null : Math.round(Math.abs(score)),
     detail_axes: axes.map(a => ({ axe: a.nom, score: r(a.score, 1), decale: a.decale || undefined })),
     axes_decales: axes.filter(a => a.decale).map(a => a.nom),

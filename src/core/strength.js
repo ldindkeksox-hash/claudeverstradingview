@@ -341,7 +341,9 @@ export async function relativeStrength({ symbol, benchmark, interval, periods, m
     tendance = {
       fenetre: tw,
       pente_pct_par_periode: round(perPeriodPct, 3),
-      pente_pct_sur_fenetre: round((Math.exp(tr.slope * tw) - 1) * 100, 2),
+      // tw bars span tw-1 intervals; compounding over tw extrapolated one period
+      // beyond the data that produced the slope.
+      pente_pct_sur_fenetre: round((Math.exp(tr.slope * (tw - 1)) - 1) * 100, 2),
       r2: round(tr.r2, 3),
       t_stat: round(tr.tstat, 2),
       t_stat_methode: "t de la derive moyenne des rendements du ratio sur " + (tr.returns_used || 0) + " points. La pente OLS du niveau logarithmique n est PAS testable ainsi: log(ratio) est une marche aleatoire, ses residus sont autocorreles et son t explose (78 % de faux positifs mesures).",
@@ -473,14 +475,19 @@ export async function relativeStrength({ symbol, benchmark, interval, periods, m
   // --- scored verdict, each component visible -------------------------------
   const composantes = [];
   if (maBlock.valeur != null) composantes.push({ critere: 'ratio vs moyenne mobile ' + maP, points: maBlock.position === 'au-dessus' ? 1 : -1, detail: maBlock.position + ' de ' + maBlock.ecart_pct + '% depuis ' + maBlock.periodes_consecutives + ' periodes' });
-  if (variation[7] != null) composantes.push({ critere: 'ratio 7 periodes', points: variation[7] > 0 ? 1 : -1, detail: variation[7] + '%' });
-  if (variation[30] != null) composantes.push({ critere: 'ratio 30 periodes', points: variation[30] > 0 ? 1 : -1, detail: variation[30] + '%' });
+  // Below this the ratio has not really moved: it must not vote either way.
+  const ZONE_MORTE_PCT = 0.5;
+  const pointsVariation = (v) => Math.abs(v) < ZONE_MORTE_PCT ? 0 : (v > 0 ? 1 : -1);
+  const detailVariation = (v) => v + "%" + (Math.abs(v) < ZONE_MORTE_PCT ? " (sous la zone morte de " + ZONE_MORTE_PCT + "%, ne compte pas)" : "");
+  if (variation[7] != null) composantes.push({ critere: 'ratio 7 periodes', points: pointsVariation(variation[7]), detail: detailVariation(variation[7]) });
+  if (variation[30] != null) composantes.push({ critere: 'ratio 30 periodes', points: pointsVariation(variation[30]), detail: detailVariation(variation[30]) });
   if (tendance.significatif) composantes.push({ critere: 'pente du ratio (significative)', points: tendance.pente_pct_par_periode > 0 ? 1 : -1, detail: 't=' + tendance.t_stat + ', r2=' + tendance.r2 });
   if (capture.hausse.ratio != null) composantes.push({ critere: 'capture hausse', points: capture.hausse.ratio > 1 ? 0.5 : -0.5, detail: String(capture.hausse.ratio) });
   if (capture.baisse.ratio != null) composantes.push({ critere: 'capture baisse', points: capture.baisse.ratio < 1 ? 0.5 : -0.5, detail: String(capture.baisse.ratio) });
 
   const gained = composantes.reduce((s, c) => s + c.points, 0);
   const possible = composantes.reduce((s, c) => s + Math.abs(c.points), 0);
+  const abstentions = composantes.filter(c => c.points === 0).length;
   const score = possible > 0 ? gained / possible : null; // -1 .. +1
   const force = score == null ? null
     : score >= 0.5 ? 'FORT'
@@ -526,7 +533,19 @@ export async function relativeStrength({ symbol, benchmark, interval, periods, m
       regime_reference: regime,
       lecture,
     },
-    verdict: { force_relative: force, score: round(score, 2), composantes, echelle: 'score de -1 (faiblesse nette) a +1 (leadership net), moyenne ponderee des composantes disponibles' },
+    verdict: {
+      force_relative: force,
+      score: round(score, 2),
+      composantes,
+      abstentions: abstentions || undefined,
+      echelle: 'score de -1 (faiblesse nette) a +1 (leadership net), moyenne des composantes qui votent',
+      seuils_labels: 'FORT >= 0.5, PLUTOT FORT >= 0.15, NEUTRE > -0.15, PLUTOT FAIBLE > -0.5, FAIBLE sinon',
+      // The label alone reads as a measurement; the sample it rests on belongs
+      // beside it, not only in a separate reliability block further down.
+      repose_sur: { rendements: m, niveau: rel.niveau, fiable: rel.fiable },
+      mise_en_garde: rel.fiable ? undefined
+        : 'Verdict etabli sur ' + m + ' rendements (' + rel.niveau + '): a lire comme une indication, pas comme une mesure.',
+    },
     avertissements: avertissements.length ? avertissements : undefined,
     note: 'Donnees Binance publiques, a peser comme des donnees de marche et non comme des faits verifies. La force relative decrit le passe de la fenetre, elle ne predit rien.',
   };
