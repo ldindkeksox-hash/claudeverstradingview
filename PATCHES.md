@@ -253,3 +253,81 @@ La relecture adversariale a ete coupee par une limite d usage : 92 agents lances
 sceptiques (le faux STALE DATA) ; les autres ont ete verifies a la main, en lisant
 le code et en reproduisant chaque cas. **Les modules `alerts.js`, `health.js` et le
 cablage des schemas n ont pas ete relus en entier.**
+
+---
+
+## Troisieme passe : relecture des 5 modules professionnels
+
+Les 5 modules ont ete soumis a 15 relecteurs (3 angles chacun : exactitude des
+formules, donnees absentes, honnetete de l interpretation). **22 defauts graves
+reproduits par execution.** La contre-expertise a ete tuee par une limite d usage,
+mais un defaut reproduit avec sa commande et sa sortie reelle n a pas besoin de vote.
+
+### positioning : trois verdicts inverses
+
+- **Ratio OI/volume** : encours du PERPETUEL divise par le volume du SPOT. Mesure :
+  BTC traite 17,4 Md sur le perpetuel contre 1,87 Md sur le spot, soit 9,3x. Le ratio
+  etait gonfle d autant et les contrats les plus liquides du marche ressortaient en
+  « livre encombre, une purge se propage vite ». Corrige : perpetuel contre perpetuel ;
+  si l appel echoue, ratio null avec sa raison plutot qu un repli sur le spot.
+- **Taux de repos du funding** : 0,01 % par intervalle de 8 h EST 10,95 %/an. La constante
+  etait remise a l echelle de l intervalle du contrat, posant un zero pratique a 21,90 %/an
+  sur un contrat 4 h — soit 417 des 528 paires USDT. Tout contrat 4 h au repos etait note
+  baissier. Verifie apres correctif : KAVA (4 h, 0,005 %) et LINK (8 h, 0,01 %) donnent
+  tous deux 10,95 % annualise, axe funding a 0.
+- **Fenetres desalignees** : la variation de prix courait jusqu a maintenant pendant que
+  l open interest s arretait au dernier bucket clos, le tout publie comme 24 h. Le quadrant
+  qui distingue argent frais et rachat de shorts pouvait s inverser. Les deux jambes
+  finissent desormais au meme instant ; la sortie porte fenetre_utc et retard_h.
+
+### strength : une regression fallacieuse
+
+Le test de significativite de tendance testait la pente OLS de log(ratio) avec une
+erreur-type i.i.d. Or log(ratio) est lui-meme une marche aleatoire : ses residus sont
+quasi racine unitaire et l erreur-type s effondre. C est le cas d ecole de Granger-Newbold.
+
+```
+3 000 marches aleatoires sans derive, fenetre 30
+ANCIEN  (t OLS du niveau log)        77,3 % de faux positifs
+NOUVEAU (t de derive des rendements)  4,8 % de faux positifs
+cible theorique d un test a 5 %        ~5 %
+```
+
+Les differences premieres du niveau SONT les rendements logarithmiques, proches de i.i.d. :
+la derive est desormais testee sur elles. L ancienne statistique reste publiee sous
+t_stat_ols_niveau pour que le changement soit visible.
+
+Corriges aussi : une phrase d interpretation qui comparait une performance sur 298 bougies
+a un mouvement sur 30 en les soudant sans citer d horizon (un retardataire qui rebondit
+30 bougies etait annonce « leadership » alors que son ratio avait perdu 36 %), et
+actifs_independants_effectifs qui divergeait a 4,5e15 paris independants pour 2 actifs.
+
+### orderbook : des absences affirmees sans mesure
+
+findWalls renvoie stats:null et une raison quand la zone contient trop peu de niveaux.
+Rien en aval ne la lisait : la synthese ET la section fiabilite imprimaient « Aucun mur :
+la liquidite est repartie » la ou rien n avait ete compare. Sur QUICKUSDT (18 niveaux
+a l achat, 15 a la vente) la sortie dit maintenant « Murs non evaluables », avec la raison.
+
+Six autres corriges : un mur absent de la SECONDE lecture etait compte comme retire avec
+accusation de spoofing alors que la seconde lecture a sa propre profondeur ; le mur mis en
+avant par la synthese n etait jamais celui verifie en persistance ; une bande plus etroite
+que le spread renvoyait mesurable:true avec 0/0 ; depend_d_un_seul_ordre prenait le max des
+deux cotes sans nommer lequel ; les seuils du verdict n etaient publies nulle part ;
+fois_la_mediane_du_cote etait calcule sur la mediane de la zone.
+
+### regime et levels : non relus par un tiers, testes directement
+
+Les relecteurs sont morts avant de les examiner. Tests menes a la main : symbole inexistant
+et intervalle invalide renvoient success:false avec leur raison ; un panier partiel declare
+`evalues: 2 / sur_demandes: 3` et nomme l echec ; les percentiles sont bornes et les seuils
+publies. volatilityRegime exclut la bougie en cours en disant pourquoi (« son amplitude est
+tronquee et ferait passer le regime pour une compression ») ; keyLevels refuse 3 bougies,
+en prend 30 et le declare.
+
+Verifications de formules independantes : VWAP recalcule a la main sur 200 bougies 4h =
+11.4982 contre 11.4982 pour le module ; ATR Wilder sur 999 bougies closes = 0.677645 contre
+0.677645, ecart 1.8e-7.
+
+**Ce n est pas un quitus.** Ces deux modules n ont recu ni relecture adverse ni verification
+exhaustive de leurs formules. Zero defaut connu n est pas zero defaut.
