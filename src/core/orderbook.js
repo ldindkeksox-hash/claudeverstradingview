@@ -268,7 +268,7 @@ function findWalls(levels, mid, side, tick) {
       distance_pct: pc((l.price - mid) / mid * 100),
       distance_ticks: tick ? Math.round(Math.abs(l.price - mid) / tick) : null,
       fois_les_voisins: r(locRatio, 1),
-      fois_la_mediane_du_cote: med > 0 ? r(l.notional / med, 1) : null,
+      fois_la_mediane_de_la_zone: med > 0 ? r(l.notional / med, 1) : null,
       part_de_la_zone_pct: r(share, 2),
       role: side === 'bid' ? 'support' : 'resistance',
     });
@@ -475,10 +475,24 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
       };
       continue;
     }
+    if (B.n === 0 && A.n === 0) {
+      desequilibre[key] = {
+        mesurable: false,
+        raison: 'Bande de ' + b + '% plus etroite que le spread (' + r(spreadPct, 4) + '%): aucun niveau ne peut s y trouver, la grandeur n est pas definie.',
+        ratio: null, desequilibre: null, verdict: null,
+        achat_quote: null, vente_quote: null,
+        niveaux: { achat: 0, vente: 0 },
+      };
+      continue;
+    }
     const tot = B.quote + A.quote;
     const imb = tot > 0 ? (B.quote - A.quote) / tot : null;
     const thin = B.n + A.n < 10;
-    const dom = Math.max(B.top / (B.quote || 1), A.top / (A.quote || 1));
+    const domB = B.quote > 0 ? B.top / B.quote : 0;
+    const domA = A.quote > 0 ? A.top / A.quote : 0;
+    // Counterfactual: what the verdict becomes once the largest order is gone.
+    const totSans = (B.quote - B.top) + (A.quote - A.top);
+    const imbSans = totSans > 0 ? ((B.quote - B.top) - (A.quote - A.top)) / totSans : null;
     desequilibre[key] = {
       mesurable: true,
       achat_base: rp(B.qty), vente_base: rp(A.qty),
@@ -487,8 +501,15 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
       desequilibre: imb == null ? null : r(imb, 3),
       verdict: imbalanceVerdict(imb),
       niveaux: { achat: B.n, vente: A.n },
+      criteres_verdict: 'desequilibre = (achat_quote - vente_quote) / (achat_quote + vente_quote). |x| < 0.1 equilibre, 0.1 <= |x| < 0.3 legere pression, |x| >= 0.3 pression nette.',
       echantillon_mince: thin || undefined,
-      depend_d_un_seul_ordre: dom >= 0.5 ? r(dom * 100, 1) + '% du cote vient d un seul niveau' : undefined,
+      depend_d_un_seul_ordre: (domB >= 0.5 || domA >= 0.5) ? {
+        achat_pct: r(domB * 100, 1),
+        vente_pct: r(domA * 100, 1),
+        cotes_concernes: [domB >= 0.5 ? 'achat' : null, domA >= 0.5 ? 'vente' : null].filter(Boolean),
+        desequilibre_sans_plus_gros_ordre: imbSans == null ? null : r(imbSans, 3),
+        verdict_sans_plus_gros_ordre: imbalanceVerdict(imbSans),
+      } : undefined,
       avertissement: thin ? 'Moins de 10 niveaux au total dans cette bande: ratio peu significatif.' : undefined,
     };
   }
@@ -517,7 +538,22 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
       for (const l of b2.bids) map.set('b' + l.price, l.qty);
       for (const l of b2.asks) map.set('a' + l.price, l.qty);
       const top2 = { b: b2.bids.length ? b2.bids[0].price : null, a: b2.asks.length ? b2.asks[0].price : null };
+      // Deepest price each side of the SECOND read reaches.
+      const reach2 = {
+        b: b2.bids.length ? b2.bids[b2.bids.length - 1].price : null,
+        a: b2.asks.length ? b2.asks[b2.asks.length - 1].price : null,
+      };
       const check = (walls, side) => walls.map(w => {
+        const horsPortee = side === 'b'
+          ? (reach2.b == null || w.prix_cle < reach2.b)
+          : (reach2.a == null || w.prix_cle > reach2.a);
+        if (horsPortee) {
+          return {
+            prix: w.prix, role: w.role, taille_avant: w.taille_base,
+            taille_apres: null, reste_pct: null, statut: 'inconnu',
+            cause: 'hors de la profondeur relue: non observe, ni maintenu ni retire.',
+          };
+        }
         const q2 = map.get(side + w.prix_cle);
         const kept = q2 == null ? 0 : q2 / (w.taille_base || 1);
         const statut = q2 == null || kept < 0.2 ? 'disparu' : (kept < 0.7 ? 'reduit' : 'maintenu');
@@ -543,7 +579,12 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
         };
       });
       const mid2 = b2.bids.length && b2.asks.length ? (b2.bids[0].price + b2.asks[0].price) / 2 : null;
-      const suivi = [...check(wB.walls, 'b'), ...check(wA.walls, 'a')];
+      const withNearest = (list, near) => {
+        if (!near) return list;
+        return list.some(x => x.prix_cle === near.prix_cle) ? list : list.concat([near]);
+      };
+      const suivi = [...check(withNearest(wB.walls, wB.nearest), 'b'),
+                     ...check(withNearest(wA.walls, wA.nearest), 'a')];
       const disparus = suivi.filter(x => x.statut !== 'maintenu');
       const retires = disparus.filter(x => x.cause && x.cause.startsWith('le prix n y est pas alle')).length;
       persistance = {
@@ -608,7 +649,11 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
     ? 'Mur le plus proche: ' + [nb ? 'support ' + nb.prix + ' (' + nb.distance_pct + '%, ' + nb.valeur_quote + Q + ')' : null,
       na ? 'resistance ' + na.prix + ' (+' + na.distance_pct + '%, ' + na.valeur_quote + Q + ')' : null].filter(Boolean).join(' | ')
       + '. Total detecte: ' + (wB.total_detectes + wA.total_detectes) + ' mur(s).'
-    : 'Aucun mur: aucun niveau n ecrase son voisinage, la liquidite est repartie.');
+    : (wB.raison || wA.raison)
+      ? 'Murs non evaluables' + (wB.raison ? ' (achat: ' + wB.raison + ')' : '')
+        + (wA.raison ? ' (vente: ' + wA.raison + ')' : '')
+        + '. Ni la presence ni l absence de mur n est etablie.'
+      : 'Aucun mur: aucun niveau n ecrase son voisinage, la liquidite est repartie.');
   const oneUp = impact['1%'] && impact['1%'].achat_pour_monter;
   const oneDn = impact['1%'] && impact['1%'].vente_pour_baisser;
   if (oneUp && oneDn) {
@@ -624,7 +669,14 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
       + (autoDepth ? '' : ' limit a ete impose par l appelant, aucune escalade automatique n a ete tentee.')
       + (book.limit < 5000 ? ' Un limit plus eleve (jusqu a 5000) irait plus loin.' : ' 5000 niveaux est le maximum servi par Binance.'));
   }
-  if (!wB.walls.length && !wA.walls.length) fiabilite.push('Aucun niveau ne se detache de son voisinage: liquidite repartie, pas de mur exploitable.');
+  if (wB.raison || wA.raison) {
+    fiabilite.push('Detection de murs non effectuee'
+      + (wB.raison ? ' cote achat: ' + wB.raison : '')
+      + (wA.raison ? ' cote vente: ' + wA.raison : '')
+      + ' Aucune conclusion sur la repartition de la liquidite ne peut en etre tiree.');
+  } else if (!wB.walls.length && !wA.walls.length) {
+    fiabilite.push('Aucun niveau ne se detache de son voisinage: liquidite repartie, pas de mur exploitable.');
+  }
   // Walls found inside a sliver of price are just top-of-book levels; saying
   // "support" or "resistance" about them would oversell what was measured.
   const reachB = wB.stats && wB.stats.zone_pct_reellement_couverte, reachA = wA.stats && wA.stats.zone_pct_reellement_couverte;
