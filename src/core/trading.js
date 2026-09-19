@@ -67,8 +67,13 @@ export async function getAccount() {
         }
       }
 
+      // Only this header row’s own table, never the whole document.
+      var scope = headRow ? headRow.closest('table') : null;
+      var scopedRows = scope
+        ? Array.prototype.slice.call(scope.querySelectorAll('tr'))
+        : [];
       var positions = [];
-      allRows.forEach(function(tr) {
+      scopedRows.forEach(function(tr) {
         if (tr === headRow) return;
         var tds = tr.querySelectorAll('td');
         if (!tds.length) return;
@@ -83,7 +88,13 @@ export async function getAccount() {
         positions.push(row);
       });
 
-      return { fields: fields, headers: headers, positions: positions };
+      return {
+        fields: fields,
+        headers: headers,
+        positions: positions,
+        tables_sur_la_page: allRows.filter(function(r) { return r.querySelectorAll('th').length > 5; }).length,
+        lignes_dans_le_tableau: scopedRows.length,
+      };
     })()
   `);
 
