@@ -478,7 +478,10 @@ export function analyzeBars(bars, opts = {}) {
   }
 
   const maxTouches = Math.max(1, ...raw.map(l => l.st.events));
+  const nbEnLice = raw.length;
   const maxVol = Math.max(1e-9, ...raw.map(l => l.st.volume));
+  const volsBougies = list.map(b => b.volume).filter(v => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  const volMedianBougie = volsBougies.length ? volsBougies[Math.floor(volsBougies.length / 2)] : 0;
 
   const levels = raw.map(l => {
     const dist = ((l.price - price) / price) * 100;
@@ -491,6 +494,12 @@ export function analyzeBars(bars, opts = {}) {
     const volN = l.st.volume / maxVol;
     const confN = Math.min(1, conf.length / 2);
     const score = 0.30 * touchN + 0.25 * volN + 0.18 * recency + 0.17 * proximity + 0.10 * confN;
+    // Absolute companion: touches and volume measured against fixed references
+    // instead of against the best of the batch, so two responses can be compared.
+    const touchesAbs = Math.min(1, l.st.events / 10);          // 10 touches = plein
+    const volAbs = volMedianBougie > 0 ? Math.min(1, l.st.volume / (volMedianBougie * 10)) : null;
+    const scoreAbsolu = volAbs == null ? null
+      : 0.40 * touchesAbs + 0.30 * volAbs + 0.20 * recency + 0.10 * confN;
 
     const type = Math.abs(l.price - price) <= tol ? 'sur_le_prix' : (l.price < price ? 'support' : 'resistance');
     return {
@@ -515,7 +524,16 @@ export function analyzeBars(bars, opts = {}) {
       bougies_depuis: l.st.lastIdx >= 0 ? (list.length - 1 - l.st.lastIdx) : null,
       confluence: conf.length ? conf : undefined,
       pondere_par_volume: l.weighted || undefined,
+      // Rank INSIDE this response: touches and volume are normalised against the
+      // best level of this batch, so the top level always scores 1 on both. It
+      // ranks levels against each other, it does not grade them.
       score: Math.round(score * 1000) / 1000,
+      score_est_un_rang: true,
+      score_comparable_entre_reponses: false,
+      niveaux_en_lice: nbEnLice,
+      // Graded against fixed references instead, so two responses can be compared.
+      score_absolu: scoreAbsolu == null ? null : Math.round(scoreAbsolu * 1000) / 1000,
+      score_absolu_base: scoreAbsolu == null ? "volume des bougies indisponible" : "touches plafonnees a 10, volume rapporte a 10x le volume median d une bougie de la fenetre",
       score_detail: {
         touches: Math.round(touchN * 100) / 100,
         volume: Math.round(volN * 100) / 100,
@@ -532,7 +550,11 @@ export function analyzeBars(bars, opts = {}) {
   // The score measures how STRONG a level is, so a heavy shelf 20% away can
   // legitimately outrank the wall price is about to hit. Both matter, so the
   // nearest levels each side are returned too rather than cut off by max_levels.
-  const brief = (l) => ({ prix: l.prix, type: l.type, touches: l.touches, distance_pct: l.distance_pct, score: l.score, confluence: l.confluence });
+  // niveaux_proches is what most callers read; the rank must not travel there
+  // without the absolute score beside it and the size of the field it ranks in.
+  const brief = (l) => ({ prix: l.prix, type: l.type, touches: l.touches, distance_pct: l.distance_pct,
+    rang_dans_cette_reponse: l.score, niveaux_en_lice: l.niveaux_en_lice, score_absolu: l.score_absolu,
+    confluence: l.confluence });
   const below = levels.filter(l => l.prix < price).sort((x, y) => y.prix - x.prix).slice(0, 3).map(brief);
   const above = levels.filter(l => l.prix > price).sort((x, y) => x.prix - y.prix).slice(0, 3).map(brief);
 

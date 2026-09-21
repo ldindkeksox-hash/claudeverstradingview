@@ -225,6 +225,11 @@ function quantile(sortedAsc, q) {
 function percentileRank(series, value) {
   const vals = series.filter(Number.isFinite);
   if (vals.length < 2 || !Number.isFinite(value)) return null;
+  // All values identical: there is no distribution to rank against. Returning
+  // 50 would announce "middle of its own history" for a flat or zero series.
+  let lo = vals[0], hi = vals[0];
+  for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (lo === hi) return null;
   let below = 0, equal = 0;
   for (const v of vals) { if (v < value) below++; else if (v === value) equal++; }
   return ((below + equal / 2) / vals.length) * 100;
@@ -623,9 +628,12 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
   const atrNow = atrS[n - 1];
   const atrPctNow = atrPctS[n - 1];
 
-  if (atrNow == null) {
+  if (!(atrNow > 0)) {
     return { success: false, symbol: sym, interval: iv,
-      error: 'ATR(' + period + ') impossible: ' + n + ' bougies cloturees disponibles, il en faut au moins ' + (period + 1) + '.',
+      error: atrNow == null
+        ? 'ATR(' + period + ') impossible: ' + n + ' bougies cloturees disponibles, il en faut au moins ' + (period + 1) + '.'
+        : 'ATR(' + period + ') nul sur les ' + n + ' bougies cloturees: serie figee ou sans amplitude. Aucun regime, aucun percentile et aucune distance de stop ne sont calculables.',
+      atr_mesure: atrNow,
       bougies_utilisees: n };
   }
 
