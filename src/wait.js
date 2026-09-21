@@ -1,4 +1,4 @@
-import { evaluate } from './connection.js';
+import { evaluate, KNOWN_PATHS } from './connection.js';
 
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
@@ -17,17 +17,22 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
           || document.querySelector('[data-name="loading"]');
         var isLoading = spinner && spinner.offsetParent !== null;
 
-        // Try to get bar count from data window or chart
+        // Bars loaded by the chart itself. The previous version counted
+        // document.querySelectorAll('[class*="bar"]'), which matches toolbar,
+        // sidebar and scrollbar — a number that never reflected the data and
+        // left chart_ready stuck on false while the symbol had in fact loaded.
         var barCount = -1;
-        try {
-          var bars = document.querySelectorAll('[class*="bar"]');
-          barCount = bars.length;
-        } catch {}
+        try { barCount = ${KNOWN_PATHS.mainSeriesBars}.size(); } catch (e) {}
 
-        // Get current symbol from header
-        var symbolEl = document.querySelector('[data-name="legend-source-title"]')
-          || document.querySelector('[class*="title"] [class*="apply-common-tooltip"]');
-        var currentSymbol = symbolEl ? symbolEl.textContent.trim() : '';
+        // Symbol as the chart API reports it, not as the header renders it:
+        // the header can still show the previous ticker mid-swap.
+        var currentSymbol = '';
+        try { currentSymbol = ${KNOWN_PATHS.chartApi}.symbol() || ''; } catch (e) {}
+        if (!currentSymbol) {
+          var symbolEl = document.querySelector('[data-name="legend-source-title"]')
+            || document.querySelector('[class*="title"] [class*="apply-common-tooltip"]');
+          currentSymbol = symbolEl ? symbolEl.textContent.trim() : '';
+        }
 
         return { isLoading: !!isLoading, barCount: barCount, currentSymbol: currentSymbol };
       })()
@@ -45,8 +50,10 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
       continue;
     }
 
-    // Check symbol match if expected
-    if (expectedSymbol && state.currentSymbol && !state.currentSymbol.toUpperCase().includes(expectedSymbol.toUpperCase())) {
+    // Exact match on the ticker segment. includes() accepted "BTCUSD" while the
+    // chart still showed "BTCUSDT" — declaring the wrong instrument ready.
+    const ticker = (s) => String(s == null ? '' : s).split(':').pop().toUpperCase();
+    if (expectedSymbol && state.currentSymbol && ticker(state.currentSymbol) !== ticker(expectedSymbol)) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
@@ -67,6 +74,9 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
 
-  // Timeout — return true anyway, caller should verify
+  // Timed out. false means "not confirmed ready within the timeout", never
+  // "the symbol failed to load" — the caller must verify rather than assume
+  // either way. (The old comment here said "return true anyway" while the code
+  // returned false, so the two disagreed about what the value meant.)
   return false;
 }

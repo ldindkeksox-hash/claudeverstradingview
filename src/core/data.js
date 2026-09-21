@@ -293,13 +293,18 @@ export async function getQuote({ symbol } = {}) {
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
-      var sym = '${symbol || ''}';
-      if (!sym) { try { sym = api.symbol(); } catch(e) {} }
-      if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
+      // The bars read below ALWAYS come from the active chart. A requested
+      // symbol therefore cannot be used as the label: doing so returned the
+      // chart's prices under someone else's name (asking for FX:EURUSD gave
+      // ChainLink quotes tagged "FX:EURUSD"). Report what the chart holds and
+      // let the caller compare.
+      var sym = '';
+      try { sym = api.symbol() || ''; } catch(e) {}
+      if (!sym) { try { sym = (api.symbolExt() || {}).symbol || ''; } catch(e) {} }
       var ext = {};
       try { ext = api.symbolExt() || {}; } catch(e) {}
       var bars = ${BARS_PATH};
-      var quote = { symbol: sym };
+      var quote = { symbol: sym, symbole_du_graphique: sym };
       if (bars && typeof bars.lastIndex === 'function') {
         var last = bars.valueAt(bars.lastIndex());
         if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
@@ -321,6 +326,21 @@ export async function getQuote({ symbol } = {}) {
     })()
   `);
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
+  // Exact match on the ticker segment: indexOf() would accept "BTCUSD" while
+  // the chart still shows "BTCUSDT", i.e. the wrong instrument.
+  const ticker = (s) => String(s == null ? '' : s).split(':').pop().toUpperCase();
+  if (symbol && ticker(symbol) !== ticker(data.symbol)) {
+    return {
+      success: false,
+      error: 'Le graphique affiche ' + data.symbol + ', pas ' + symbol + '. Cet outil lit les bougies du graphique actif: '
+        + 'renvoyer ce prix sous l etiquette ' + symbol + ' donnerait un cours faux presente comme vrai. '
+        + 'Appeler chart_set_symbol("' + symbol + '") d abord, ou appeler quote_get sans symbole pour coter le graphique tel quel.',
+      symbole_demande: symbol,
+      symbole_du_graphique: data.symbol,
+      prix_du_graphique: data.last != null ? data.last : data.close,
+      description_du_graphique: data.description,
+    };
+  }
   return { success: true, ...data };
 }
 

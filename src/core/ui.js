@@ -287,7 +287,15 @@ export async function findElement({ query, strategy }) {
   return { success: true, query, strategy: strat, count: results?.length || 0, elements: results || [] };
 }
 
-export async function uiEvaluate({ expression }) {
-  const result = await evaluate(expression);
-  return { success: true, result };
+export async function uiEvaluate({ expression, await_promise = true }) {
+  // Without awaitPromise, an async expression serialises to {} and is returned
+  // with success:true — a silent empty answer that reads like "no data" rather
+  // than "never awaited". Awaiting is the safe default: CDP returns a
+  // non-promise value unchanged, so nothing else is affected.
+  const result = await evaluate(expression, { awaitPromise: await_promise !== false });
+  const out = { success: true, promesse_attendue: await_promise !== false, result };
+  if (!await_promise && result != null && typeof result === 'object' && Object.keys(result).length === 0) {
+    out.avertissement = 'Resultat vide avec await_promise=false. Une expression asynchrone se serialise en {} tant qu elle n est pas attendue: relancer avec await_promise=true avant de conclure que la page n a rien renvoye.';
+  }
+  return out;
 }

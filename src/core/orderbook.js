@@ -640,7 +640,20 @@ export async function orderbook({ symbol, depth_pct, limit, persistence_check, p
   if (mainBand && mainBand.mesurable) {
     synthese.push('Bande ' + String(pct) + '%: ' + mainBand.achat_quote + Q + ' a l achat contre ' + mainBand.vente_quote + Q + ' a la vente (ratio '
       + mainBand.ratio + ', ' + mainBand.niveaux.achat + '+' + mainBand.niveaux.vente + ' niveaux) -> ' + mainBand.verdict + '.'
-      + (mainBand.depend_d_un_seul_ordre ? ' Attention: ' + mainBand.depend_d_un_seul_ordre + '.' : ''));
+      // depend_d_un_seul_ordre is an object; concatenating it printed
+      // "Attention: [object Object]", hiding the single most important caveat
+      // of the whole reading — that the verdict rests on one order.
+      + (mainBand.depend_d_un_seul_ordre
+        ? ' Attention: ' + mainBand.depend_d_un_seul_ordre.cotes_concernes.join(' et ')
+          + ' — un seul ordre porte '
+          + mainBand.depend_d_un_seul_ordre.cotes_concernes
+            .map(function (c) { return c + ' ' + mainBand.depend_d_un_seul_ordre[c + '_pct'] + '%'; })
+            .join(', ')
+          + ' de la bande. Sans lui: desequilibre '
+          + mainBand.depend_d_un_seul_ordre.desequilibre_sans_plus_gros_ordre
+          + ' -> ' + mainBand.depend_d_un_seul_ordre.verdict_sans_plus_gros_ordre
+          + '. Ce verdict tient a un ordre qui peut etre retire avant d etre touche.'
+        : ''));
   } else if (mainBand) {
     synthese.push('Bande ' + String(pct) + '% non mesurable: ' + mainBand.raison);
   }

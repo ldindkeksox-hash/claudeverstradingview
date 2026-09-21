@@ -39,7 +39,23 @@ export async function setSymbol({ symbol }) {
     })()
   `);
   const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+  // Echoing the requested symbol says nothing about what actually loaded.
+  // Read it back so a caller can tell a confirmed swap from an unconfirmed one
+  // before trusting any price that follows.
+  let resolved = null;
+  try { resolved = (await getState()).symbol; } catch (e) { /* chart unreachable */ }
+  const ticker = (s) => String(s == null ? '' : s).split(':').pop().toUpperCase();
+  const matched = resolved != null && ticker(resolved) === ticker(symbol);
+  return {
+    success: true,
+    symbol,
+    symbole_charge: resolved,
+    symbole_confirme: matched,
+    chart_ready: ready,
+    signification_chart_ready: ready
+      ? undefined
+      : 'false = chargement non confirme dans le delai imparti, pas un echec. Se fier a symbole_confirme pour savoir si le bon instrument est affiche.',
+  };
 }
 
 // Seconds per bar for each resolution TradingView accepts.

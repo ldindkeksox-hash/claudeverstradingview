@@ -85,10 +85,11 @@ export function registerUiTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('ui_evaluate', 'Execute JavaScript code in the TradingView page context for advanced automation', {
+  server.tool('ui_evaluate', 'Execute JavaScript code in the TradingView page context for advanced automation. Async expressions (fetch, await) are awaited by default.', {
     expression: z.string().describe('JavaScript expression to evaluate in the page context. Wrap in IIFE for complex logic.'),
-  }, async ({ expression }) => {
-    try { return jsonResult(await core.uiEvaluate({ expression })); }
+    await_promise: z.coerce.boolean().optional().describe('Await a returned Promise before serialising (default true). Set false only to inspect the Promise object itself.'),
+  }, async ({ expression, await_promise }) => {
+    try { return jsonResult(await core.uiEvaluate({ expression, await_promise })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }
