@@ -890,7 +890,9 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
       lecture: (chop == null && er == null) ? null :
         (chop != null && chop > 61.8) ? 'Choppiness > 61.8: marche en range. Les cassures echouent, les extremes se vendent et s achetent. Les strategies de suivi de tendance saignent ici.'
           : (chop != null && chop < 38.2) ? 'Choppiness < 38.2: marche en tendance. Les replis se rachetent, les moyennes mobiles tiennent.'
-            : 'Zone intermediaire: ni range franc ni tendance franche.',
+            : chop == null
+              ? 'Choppiness non mesurable sur cette fenetre: aucun verdict range/tendance n est publie. Ce n est pas une zone intermediaire, c est une absence de mesure.'
+              : 'Zone intermediaire: ni range franc ni tendance franche.',
       complement: er == null ? null : (er > 0.4
         ? 'Efficiency ratio eleve: le mouvement va quelque part, le deplacement net est une grande part du chemin parcouru.'
         : er < 0.2
@@ -1309,6 +1311,7 @@ export async function marketBreadth({ symbols, interval, limit, consensus } = {}
 
   /* --- leaders and laggards ------------------------------------------------- */
   const ranked = [...with24].sort((a, b) => b.variation_24h_pct - a.variation_24h_pct);
+  const kTop = Math.min(3, Math.floor(ranked.length / 2));
   const slim = r => ({
     symbol: r.symbol,
     variation_24h_pct: r.variation_24h_pct,
@@ -1409,8 +1412,13 @@ export async function marketBreadth({ symbols, interval, limit, consensus } = {}
 
     consensus_tradingview: tv,
 
-    leaders: ranked.slice(0, 3).map(slim),
-    retardataires: ranked.slice(-3).reverse().map(slim),
+    // Both slices are bounded to half the field so they can never intersect:
+    // naming the top performer a laggard is worse than publishing no ranking.
+    leaders: kTop >= 1 ? ranked.slice(0, kTop).map(slim) : [],
+    retardataires: kTop >= 1 ? ranked.slice(-kTop).reverse().map(slim) : [],
+    classement_sur: ranked.length,
+    classement_indisponible: kTop >= 1 ? undefined
+      : 'Moins de 2 symboles avec une variation 24h exploitable (' + ranked.length + '): aucun classement leaders/retardataires n est publiable.',
 
     detail,
 

@@ -261,9 +261,15 @@ function volumeProfile(bars, bins, dec) {
       volume: r2(sum),
       part_pct: Math.round((sum / total) * 10000) / 100,
       // how much taller the weakest flank is than the hole itself
-      prominence: Math.round((Math.min(left, right) / base) * 100) / 100,
+      // A bin that never traded is not a thin zone, it is an untouched one.
+      prominence: vol[worst] > 0 ? Math.min(99, Math.round((Math.min(left, right) / base) * 100) / 100) : null,
+      vide: vol[worst] > 0 ? undefined : true,
+      type_zone: vol[worst] > 0 ? 'faible_volume' : 'jamais_visitee',
+      prominence_raison: vol[worst] > 0 ? undefined : 'creux a volume nul: aucun rapport n est definissable, la zone n a jamais ete echangee',
     };
-  }).sort((x, y) => y.prominence - x.prominence);
+  // Measurable zones first, ranked; never-traded zones after, where they cannot
+  // sort against a ratio they do not have.
+  }).sort((x, y) => (x.prominence == null) - (y.prominence == null) || (y.prominence - x.prominence));
 
   const hvnThreshold = HVN_FACTOR * pocVol;
   const hvn = runs(k => vol[k] >= hvnThreshold).map(([a, b]) => {
@@ -290,10 +296,12 @@ function volumeProfile(bars, bins, dec) {
       bins: vaHi - vaLo + 1,
       cible_pct: VALUE_AREA * 100,
     },
+    seuils_fiabilite: 'fiable si au moins ' + MIN_BARS + ' bougies ET au moins ' + BARS_PER_BIN_RELIABLE + ' bougies par bin (mesure: ' + r2(barsPerBin, 2) + ')',
     zones_faible_volume: lvn,
     zones_faible_volume_methode: 'Creux locaux dont les deux flancs (5 bins de chaque cote) pesent au moins ' +
       LVN_PROMINENCE + 'x le creux, volume sous la moyenne des bins, bords de fenetre exclus. prominence = rapport du flanc le plus faible au creux.',
     zones_fort_volume: hvn,
+    zones_fort_volume_methode: 'Bins dont le volume atteint au moins 70% de celui du POC.',
     amplitude: { bas: rp(lo, dec), haut: rp(hi, dec), pas_bin: rp(width, dec) },
     bins,
     bars_used: barsUsed,
@@ -416,8 +424,20 @@ function touchStats(bars, level, tol) {
  * Exported so the same maths can run on chart bars or backtest bars.
  */
 export function analyzeBars(bars, opts = {}) {
+  const recues = Array.isArray(bars) ? bars.length : 0;
   const list = Array.isArray(bars) ? bars.filter(b =>
-    b && Number.isFinite(b.high) && Number.isFinite(b.low) && Number.isFinite(b.close) && Number.isFinite(b.volume)) : [];
+    b && Number.isFinite(b.time) && Number.isFinite(b.high) && Number.isFinite(b.low)
+    && Number.isFinite(b.close) && Number.isFinite(b.volume)) : [];
+  const rejetees = recues - list.length;
+  const tauxRejet = recues ? rejetees / recues : 0;
+  const REJET_MAX = 0.30;
+  if (recues > 0 && tauxRejet > REJET_MAX) {
+    return {
+      success: false,
+      error: rejetees + ' bougies sur ' + recues + ' sont inexploitables (' + Math.round(tauxRejet * 100) + '%, plafond ' + (REJET_MAX * 100) + '%). Calculer sur le residu donnerait des niveaux d apparence normale tires d une fraction de la fenetre.',
+      bougies_recues: recues, bougies_rejetees: rejetees, bougies_exploitables: list.length,
+    };
+  }
 
   if (list.length < MIN_BARS) {
     return {
@@ -501,7 +521,13 @@ export function analyzeBars(bars, opts = {}) {
     const touchN = l.st.events / maxTouches;
     const volN = l.st.volume / maxVol;
     const confN = Math.min(1, conf.length / 2);
-    const score = 0.30 * touchN + 0.25 * volN + 0.18 * recency + 0.17 * proximity + 0.10 * confN;
+    const typeLvl = Math.abs(l.price - price) <= tol ? "sur_le_prix" : (l.price < price ? "support" : "resistance");
+    // Favourable exit: upward off a support, downward off a resistance.
+    const sorties = l.st.exitUp + l.st.exitDown;
+    const favorables = typeLvl === "resistance" ? l.st.exitDown : l.st.exitUp;
+    const defense = sorties > 0 ? favorables / sorties : null;   // null = jamais quitte
+    const defenseN = defense == null ? 0.5 : defense;            // neutre si inconnu, jamais un bonus
+    const score = 0.20 * touchN + 0.10 * defenseN + 0.25 * volN + 0.18 * recency + 0.17 * proximity + 0.10 * confN;
     // Absolute companion: touches and volume measured against fixed references
     // instead of against the best of the batch, so two responses can be compared.
     const touchesAbs = Math.min(1, l.st.events / 10);          // 10 touches = plein
@@ -509,7 +535,7 @@ export function analyzeBars(bars, opts = {}) {
     const scoreAbsolu = volAbs == null ? null
       : 0.40 * touchesAbs + 0.30 * volAbs + 0.20 * recency + 0.10 * confN;
 
-    const type = Math.abs(l.price - price) <= tol ? 'sur_le_prix' : (l.price < price ? 'support' : 'resistance');
+    const type = typeLvl;
     return {
       prix: rp(l.price, dec),
       type,
@@ -524,6 +550,8 @@ export function analyzeBars(bars, opts = {}) {
       zone: { bas: rp(l.price - tol, dec), haut: rp(l.price + tol, dec) },
       volume_aux_touches: r2(l.st.volume),
       bougies_dans_zone: l.st.barsIn,
+      defense: defense == null ? null : Math.round(defense * 100) / 100,
+      defense_raison: defense == null ? 'le prix n a jamais quitte la zone: defense non mesurable' : undefined,
       sorties_haut: l.st.exitUp,       // visits price left upward: buyers won there
       sorties_bas: l.st.exitDown,      // visits price left downward: sellers won there
       visite_en_cours: l.st.ongoing || undefined,
@@ -560,7 +588,8 @@ export function analyzeBars(bars, opts = {}) {
   // nearest levels each side are returned too rather than cut off by max_levels.
   // niveaux_proches is what most callers read; the rank must not travel there
   // without the absolute score beside it and the size of the field it ranks in.
-  const brief = (l) => ({ prix: l.prix, type: l.type, touches: l.touches, distance_pct: l.distance_pct,
+  const brief = (l) => ({ prix: l.prix, type: l.type, touches: l.touches,
+    defense: l.defense, sorties_haut: l.sorties_haut, sorties_bas: l.sorties_bas, distance_pct: l.distance_pct,
     rang_dans_cette_reponse: l.score, niveaux_en_lice: l.niveaux_en_lice, score_absolu: l.score_absolu,
     confluence: l.confluence });
   const below = levels.filter(l => l.prix < price).sort((x, y) => y.prix - x.prix).slice(0, 3).map(brief);
@@ -584,7 +613,9 @@ export function analyzeBars(bars, opts = {}) {
     if (profile.zones_faible_volume.length) {
       const z = profile.zones_faible_volume[0];
       lecture.push('Zone de faible volume la plus marquee: ' + z.bas + ' - ' + z.haut + ' (' + z.part_pct +
-        '% du volume, flancs ' + z.prominence + 'x plus epais). Le prix la traverse vite, peu de support a attendre dedans.');
+        '% du volume' + (z.prominence == null
+          ? ', jamais echangee sur la fenetre'
+          : ', flancs ' + z.prominence + 'x plus epais') + '). Le prix la traverse vite, peu de support a attendre dedans.');
     } else {
       lecture.push('Aucune zone de faible volume nette: le volume est reparti sans trou marque sur la fenetre.');
     }
@@ -602,7 +633,7 @@ export function analyzeBars(bars, opts = {}) {
   if (!vwap.fiable && vwap.raison) warnings.push(vwap.raison);
   if (profile && profile.error) warnings.push(profile.error);
   else if (profile && !profile.fiable) warnings.push(profile.raison);
-  if (!pivotsReliable) warnings.push('Seulement ' + pivotCount + ' pivots detectes sur ' + list.length +
+  if (!pivotsReliable) warnings.push('Seuil: au moins ' + MIN_PIVOTS_RELIABLE + ' pivots. Seulement ' + pivotCount + ' pivots detectes sur ' + list.length +
     ' bougies (lookback ' + L + '): les niveaux par regroupement sont indicatifs.');
   if (!kept.length) warnings.push('Aucun niveau par regroupement: aucun pivot exploitable sur la fenetre.');
 
