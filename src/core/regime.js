@@ -726,7 +726,9 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
       '% des excursions sur ' + hz + ' bougies. Soit l horizon est trop long pour cet actif, soit la volatilite actuelle impose de reduire la taille plutot que d elargir encore.');
   }
   // In an ongoing expansion the past understates what is coming; add a cushion.
-  if (pAtr != null && pAtr >= 80 && suggested < 3) suggested = r2(suggested * 1.2, 2);
+  const multipleEmpirique = suggested;
+  const majore = pAtr != null && pAtr >= 80 && suggested < 3;
+  if (majore) suggested = r2(suggested * 1.2, 2);
 
   // Hard floor at 1 ATR. On a quiet sample the empirical table happily says 0.75
   // ATR would have survived — and it is right about the PAST. But a stop inside
@@ -747,8 +749,11 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
   for (let i = n - rangeWin; i < n; i++) if (c[i] > 0) rangePct.push((h[i] - l[i]) / c[i] * 100);
   rangePct.sort((a, b) => a - b);
 
-  const sigmaBar = sdNow;
-  const tailObs = sigmaBar ? rets.filter(x => Math.abs(x) > 2 * sigmaBar).length / rets.length * 100 : null;
+  const sigmaBar = sdNow;                 // short window: the move expected NOW
+  const sigmaAll = rets.length >= 3 ? stdev(rets) : null;   // whole sample: the reference the 4.55% belongs to
+  const tailObs = sigmaAll > 0
+    ? rets.filter(x => Math.abs(x) > 2 * sigmaAll).length / rets.length * 100
+    : null;
 
   /* --- position sizing ------------------------------------------------------ */
   const base = Number(capital) > 0 ? Number(capital) : 10000;
@@ -906,6 +911,8 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
       queues_epaisses: {
         depassements_2sigma_observes_pct: r2(tailObs, 2),
         attendu_loi_normale_pct: 4.55,
+        sigma_de_reference_pct: sigmaAll == null ? null : r2(sigmaAll * 100, 3),
+        base: sigmaAll == null ? null : 'ecart-type des ' + rets.length + ' rendements de l historique complet, le meme echantillon que celui compte. Comparer a un sigma de fenetre courte mesurerait le changement de regime, pas l epaisseur des queues.',
         lecture: tailObs == null ? null : (tailObs > 6
           ? 'Les depassements de 2 sigma sont ' + r2(tailObs / 4.55, 1) + 'x plus frequents que ne le predit une loi normale. Dimensionner sur un sigma gaussien sous-estime le risque reel de cet actif.'
           : 'Frequence des grands ecarts proche de ce qu une loi normale predit sur cette fenetre.'),
@@ -936,8 +943,12 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
       note_plancher: floored
         ? "La distribution empirique tolerait un stop plus serre, mais le plancher de 1 ATR a ete applique: un stop sous l'amplitude moyenne d'une bougie est touche par le bruit, et l'echantillon passe ne contient pas l'expansion a venir."
         : null,
-      ajustement_regime: label == null ? null : (pAtr >= 80
+      multiple_avant_ajustement: multipleEmpirique,
+      majoration_appliquee: majore,
+      ajustement_regime: label == null ? null : (majore
         ? 'Regime a volatilite extreme: le multiple a ete majore de 20% car les excursions passees sous-estiment une expansion en cours. Reduire la taille plutot que de compter sur le stop.'
+        : (pAtr != null && pAtr >= 80)
+          ? 'Regime a volatilite extreme, mais le multiple est deja au maximum teste (3 ATR): AUCUNE majoration n a pu etre appliquee. La distribution passee ne couvre pas ce regime, reduire la taille est la seule marge disponible.'
         : pAtr < 25
           ? 'Regime comprime: le stop en pourcentage parait confortable, mais une expansion peut doubler l ATR en quelques bougies. Le stop doit rester valide APRES expansion, pas seulement aujourd hui.'
           : 'Multiple issu directement de la distribution empirique, sans ajustement.'),
@@ -959,6 +970,7 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
 
     regime: {
       label,
+      seuils_percentile: { 'compression extreme': '< 10', compression: '10-25', basse: '25-45', normale: '45-60', haute: '60-80', extreme: '>= 80' },
       percentile_atr: r2(pAtr, 1),
       percentile_volatilite_realisee: r2(pRv, 1),
       persistance_bougies: persistance,

@@ -117,7 +117,9 @@ function vwapBlock(bars, dec) {
   // E[x^2] - E[x]^2 can go very slightly negative through float error; clamp at 0.
   const variance = Math.max(0, pv2 / vol - vwap * vwap);
   const sd = Math.sqrt(variance);
-  const thin = used < MIN_BARS;
+  const couverture = bars.length ? used / bars.length : 0;
+  const COUVERTURE_MIN = 0.8;
+  const thin = used < MIN_BARS || couverture < COUVERTURE_MIN;
   return {
     vwap: rp(vwap, dec),
     ecart_type: rp(sd, dec),
@@ -127,10 +129,16 @@ function vwapBlock(bars, dec) {
       inf_1: rp(vwap - sd, dec),
       inf_2: rp(vwap - 2 * sd, dec),
     },
-    bars_used: used,
+    bougies_avec_volume: used,
+    bougies_dans_la_fenetre: bars.length,
+    couverture_pct: r2(couverture * 100, 1),
     volume_total: r2(vol),
     fiable: !thin,
-    raison: thin ? 'Seulement ' + used + ' bougies avec volume: VWAP indicatif.' : undefined,
+    seuils_fiabilite: 'fiable si au moins ' + MIN_BARS + ' bougies portent du volume ET si elles couvrent au moins ' + (COUVERTURE_MIN * 100) + '% de la fenetre',
+    raison: !thin ? undefined
+      : (used < MIN_BARS
+          ? 'Seulement ' + used + ' bougies portent du volume (minimum ' + MIN_BARS + '): VWAP indicatif.'
+          : used + ' bougies sur ' + bars.length + ' portent du volume, soit ' + r2(couverture * 100, 1) + '% de la fenetre. Le VWAP et ses bandes ne decrivent que cette fraction: un ecart exprime en ecarts-types serait un artefact d echantillonnage, pas un signal.'),
     note: 'VWAP ancre sur toute la fenetre demandee, prix typique (H+L+C)/3 pondere par le volume. Ce n est pas le VWAP de session quotidien affiche par defaut sur TradingView.',
   };
 }
