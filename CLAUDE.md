@@ -1,6 +1,38 @@
 # TradingView MCP — Claude Instructions
 
-68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+99 tools for reading and controlling a live TradingView chart via CDP (port 9222).
+
+## Data source — read this before any analysis tool
+
+Analysis tools do **not** all cover the same instruments. Getting this wrong wastes a whole
+analysis pass on `Invalid symbol`.
+
+| Tool | Crypto (Binance) | Gold, forex, indices, stocks |
+|------|------------------|------------------------------|
+| `analysis_fibonacci`, `strategy_backtest`, `strategy_find` | yes | **yes** — falls back to the chart's series |
+| `analysis_key_levels` | yes | **yes** — falls back to the chart's series |
+| `analysis_volatility_regime`, `analysis_relative_strength` | yes | **no** — Binance klines only |
+| `market_positioning`, `market_orderbook` | yes | **no** — funding, open interest and depth are Binance-specific |
+| `market_technicals`, `market_breadth` | yes | **no** — crypto-scoped scanner |
+| `data_get_ohlcv`, `data_get_study_values`, `quote_get`, `market_news`, `market_calendar` | yes | yes — these read the chart |
+
+The chart fallback **swaps the displayed symbol and resolution, then restores them**. It is a
+side effect on the user's view, and `source` in every result says which path answered
+(`binance` or `chart`/`tradingview:chart`). A chart-sourced feed may carry no volume — when it
+does not, POC, value area and VWAP are unavailable and the result says so rather than computing
+them on zeros.
+
+`quote_get` reads the ACTIVE CHART's bars. Passing a symbol that is not the chart's returns
+`success: false` naming both — call `chart_set_symbol` first.
+
+## Analysis discipline
+
+- A backtest result without its sample size is worthless. `strategy_backtest` returns `t_stat`
+  and a random-entry control; under 30 trades or |t| < 2, report it as unproven, never as an edge.
+- `strategy_find` tries 16 combinations. Keeping the best of 16 invents edges out of noise — its
+  `mise_en_garde` states the expected number of false positives. Pass it on to the user.
+- A Fibonacci ratio has no power in itself. Quote `taux_respect` and `touches` from
+  `analysis_fibonacci`, not the ratio.
 
 ## Decision Tree — Which Tool When
 
