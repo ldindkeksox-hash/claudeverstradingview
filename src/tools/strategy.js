@@ -8,6 +8,7 @@ import { z } from 'zod';
 import * as fib from '../core/fibonacci.js';
 import * as bt from '../core/backtest.js';
 import * as macro from '../core/macro.js';
+import * as gold from '../core/gold.js';
 
 const jsonResult = (data, isError = false) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
@@ -100,6 +101,58 @@ export function registerStrategyTools(server) {
     },
     async (args) => {
       try { return jsonResult(await macro.sessionProfile(args)); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    },
+  );
+
+  server.tool(
+    'analysis_order_blocks',
+    'Smart Money Concepts order blocks (the "OB sell zone" method), detected AND tested. Finds the last opposing candle before an impulsive move, then measures what a trader taking that zone would actually have made: fill at the PROXIMAL edge, stop beyond the far side, and the real reward:risk once the stop has to clear the zone. Returns expectancy in R, not just a flattering win rate.',
+    {
+      symbol: z.string().optional().describe('Default OANDA:XAUUSD'),
+      interval: z.string().optional().describe('Default 5m. Try 1h too — it tests better on gold.'),
+      periods: z.coerce.number().optional().describe('Bars of history (default 2000)'),
+      impulsion_atr: z.coerce.number().optional().describe('How violent the move after the candle must be, in ATR (default 2)'),
+      impulsion_bougies: z.coerce.number().optional().describe('Bars the impulse may take (default 5)'),
+      zone: z.enum(['corps', 'meche']).optional().describe('Zone = candle body (default, tighter, better R) or full wick range'),
+      reaction_atr: z.coerce.number().optional().describe('Target distance in ATR used to judge a reaction (default 1)'),
+      max_blocs: z.coerce.number().optional().describe('Untouched zones to return (default 12)'),
+    },
+    async (args) => {
+      try { return jsonResult(await gold.orderBlocks(args)); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    },
+  );
+
+  server.tool(
+    'plan_trade',
+    'Plan a multi-target trade (several TPs, one SL). Gives each target its distance in points AND pips, its R, the partial gain, and — the part people skip — every partial outcome, including "TP1 hit then stopped on the rest", which is usually breakeven rather than a win. Also compares scaling out against a single exit.',
+    {
+      entree: z.coerce.number().describe('Entry price'),
+      stop: z.coerce.number().describe('Stop loss price'),
+      sens: z.enum(['long', 'short']).optional().describe('Default long'),
+      objectifs: z.array(z.coerce.number()).optional().describe('Target prices. Omitted = 1R, 2R, 3R.'),
+      parts: z.array(z.coerce.number()).optional().describe('Share of the position closed at each target, e.g. [0.5,0.3,0.2]. Normalised automatically.'),
+      capital_risque_usd: z.coerce.number().optional().describe('USD risked if the stop is hit — turns every R into a dollar figure'),
+      taux_reussite_estime: z.coerce.number().optional().describe('Win rate used for the scaling-out comparison (default 0.5)'),
+      convention_pips: z.enum(['standard', 'point', 'dollar']).optional().describe('Gold pip convention (default standard: 1 pip = $0.10)'),
+    },
+    async (args) => {
+      try { return jsonResult(gold.planTrade(args)); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    },
+  );
+
+  server.tool(
+    'gold_pips',
+    'Convert between dollars and pips on gold under all three conventions in circulation. "300 pips" means $30, $3 or $300 depending on who is speaking — a factor of 100 — so check before copying anyone\'s stop.',
+    {
+      montant_usd: z.coerce.number().optional().describe('A dollar move to express in pips'),
+      pips: z.coerce.number().optional().describe('A number of pips to express in dollars'),
+      convention: z.enum(['standard', 'point', 'dollar']).optional().describe('Default standard (1 pip = $0.10)'),
+    },
+    async (args) => {
+      try { return jsonResult(gold.pips(args)); }
       catch (err) { return jsonResult({ success: false, error: err.message }, true); }
     },
   );
