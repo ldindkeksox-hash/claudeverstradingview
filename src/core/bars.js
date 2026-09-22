@@ -18,7 +18,50 @@ import { evaluate } from '../connection.js';
 import { getState, setSymbol, setTimeframe } from './chart.js';
 
 const SPOT = 'https://api.binance.com/api/v3';
+const YAHOO = 'https://query1.finance.yahoo.com/v8/finance/chart/';
 const BARS = 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()';
+
+/**
+ * The chart holds only what TradingView has already loaded — measured at 300
+ * bars, whatever is asked for. A backtest on 300 bars produces single-digit
+ * trade counts, which prove nothing. Yahoo serves the same instruments with
+ * years of hourly history, so it is the depth source.
+ *
+ * `equivalent: false` marks a proxy whose PRICES are not the traded
+ * instrument's: GC=F is the COMEX future and carries a premium over spot gold
+ * (about +1%). Percentage moves, volatility and strategy statistics transfer;
+ * absolute price levels do not, and every result says so.
+ */
+const YAHOO_MAP = {
+  XAUUSD: { y: 'GC=F', equivalent: false, note: 'future COMEX (GC), prime de portage d environ +1% sur le spot XAUUSD' },
+  GOLD: { y: 'GC=F', equivalent: false, note: 'future COMEX (GC)' },
+  XAGUSD: { y: 'SI=F', equivalent: false, note: 'future COMEX argent (SI)' },
+  SILVER: { y: 'SI=F', equivalent: false, note: 'future COMEX argent (SI)' },
+  USOIL: { y: 'CL=F', equivalent: false, note: 'future NYMEX WTI (CL)' },
+  WTICOUSD: { y: 'CL=F', equivalent: false, note: 'future NYMEX WTI (CL)' },
+  DXY: { y: 'DX-Y.NYB', equivalent: true, note: 'indice dollar ICE' },
+  EURUSD: { y: 'EURUSD=X', equivalent: true },
+  GBPUSD: { y: 'GBPUSD=X', equivalent: true },
+  USDJPY: { y: 'USDJPY=X', equivalent: true },
+  AUDUSD: { y: 'AUDUSD=X', equivalent: true },
+  USDCHF: { y: 'USDCHF=X', equivalent: true },
+  SPX: { y: '^GSPC', equivalent: true }, SP500: { y: '^GSPC', equivalent: true },
+  NDX: { y: '^NDX', equivalent: true }, US100: { y: '^NDX', equivalent: true },
+  DJI: { y: '^DJI', equivalent: true }, VIX: { y: '^VIX', equivalent: true },
+  US10Y: { y: '^TNX', equivalent: true, note: 'rendement 10 ans US' },
+  TNX: { y: '^TNX', equivalent: true },
+};
+
+/** Yahoo equivalent of a TradingView symbol, or null when none is known. */
+export function yahooSymbol(symbol) {
+  const t = ticker(symbol);
+  if (YAHOO_MAP[t]) return YAHOO_MAP[t];
+  // An equity keeps its ticker: NASDAQ:AAPL is AAPL on Yahoo too.
+  if (/^[A-Z][A-Z.\-]{0,5}$/.test(t) && exchangeOf(symbol) && !['BINANCE', 'OANDA', 'FX', 'TVC', 'FOREXCOM'].includes(exchangeOf(symbol))) {
+    return { y: t, equivalent: true };
+  }
+  return null;
+}
 
 // Binance interval <-> TradingView resolution. The two name the same periods
 // differently, and a caller should not have to know which module wants which.
@@ -92,6 +135,54 @@ async function fromBinance(symbol, interval, limit) {
     l.push(Number(k[3])); c.push(Number(k[4])); v.push(Number(k[5]));
   }
   return { ok: true, source: 'binance', symbol: sym, interval: iv.binance, t, o, h, l, c, v, n: c.length, bougie_en_cours_exclue: forming };
+}
+
+// Yahoo's own interval names, and how far back each may be asked to go.
+const YAHOO_IV = { '1m': ['1m', '7d'], '5m': ['5m', '60d'], '15m': ['15m', '60d'], '30m': ['30m', '60d'], '1h': ['1h', '2y'], '1d': ['1d', '10y'], '1w': ['1wk', '10y'], '1M': ['1mo', '10y'] };
+
+async function fromYahoo(symbol, interval, limit) {
+  const iv = normalizeInterval(interval);
+  const map = yahooSymbol(symbol);
+  if (!map) return { ok: false, error: 'aucun equivalent Yahoo connu pour ' + symbol };
+  const spec = YAHOO_IV[iv.binance];
+  if (!spec) return { ok: false, error: 'intervalle ' + interval + ' non servi par Yahoo' };
+
+  const res = await getJSON(YAHOO + encodeURIComponent(map.y) + '?interval=' + spec[0] + '&range=' + spec[1]);
+  if (!res.ok) return { ok: false, error: res.error };
+  const rr = res.data && res.data.chart && res.data.chart.result && res.data.chart.result[0];
+  if (!rr || !Array.isArray(rr.timestamp) || rr.timestamp.length === 0) {
+    const e = res.data && res.data.chart && res.data.chart.error;
+    return { ok: false, error: 'aucune bougie Yahoo pour ' + map.y + (e ? ' (' + e.description + ')' : '') };
+  }
+
+  const q = rr.indicators.quote[0];
+  const t = [], o = [], h = [], l = [], c = [], v = [];
+  for (let i = 0; i < rr.timestamp.length; i++) {
+    // Yahoo pads gaps with nulls; a null bar is absent data, never a flat bar.
+    if (q.open[i] == null || q.high[i] == null || q.low[i] == null || q.close[i] == null) continue;
+    t.push(rr.timestamp[i]); o.push(q.open[i]); h.push(q.high[i]); l.push(q.low[i]); c.push(q.close[i]);
+    v.push(q.volume && q.volume[i] != null ? q.volume[i] : 0);
+  }
+  if (c.length < 30) return { ok: false, error: 'seulement ' + c.length + ' bougies exploitables chez Yahoo' };
+
+  // Keep the most recent `limit` bars.
+  const keep = Math.max(50, Math.min(Number(limit) || 1000, c.length));
+  const from = c.length - keep;
+  const withVol = v.slice(from).filter(x => x > 0).length;
+  return {
+    ok: true, source: 'yahoo', symbol: ticker(symbol), symbole_source: map.y,
+    interval: iv.binance,
+    t: t.slice(from), o: o.slice(from), h: h.slice(from), l: l.slice(from), c: c.slice(from), v: v.slice(from),
+    n: keep,
+    bougie_en_cours_exclue: false,
+    prix_equivalents: map.equivalent !== false,
+    equivalence_note: map.equivalent === false
+      ? 'PRIX NON EQUIVALENTS: ' + map.y + ' est un ' + (map.note || 'instrument voisin')
+        + '. Les variations en %, la volatilite et les statistiques de strategie sont transposables; les NIVEAUX DE PRIX absolus ne le sont pas.'
+      : map.note,
+    volume_disponible: withVol > 0,
+    volume_couverture_pct: keep ? Math.round(withVol / keep * 1000) / 10 : 0,
+  };
 }
 
 /**
@@ -170,22 +261,49 @@ async function fromChart(symbol, interval, limit) {
  * Bars for any symbol TradingView can display.
  * `source` in the result says which path answered, so a caller can report it.
  */
-export async function fetchBars({ symbol, interval = '1h', limit = 500, source } = {}) {
+export async function fetchBars({ symbol, interval = '1h', limit = 500, source, prefer = 'exactitude' } = {}) {
   if (!symbol) return { ok: false, error: 'symbole requis' };
-  const plan = source || preferredSource(symbol);
 
-  if (plan === 'chart') return fromChart(symbol, interval, limit);
-  if (plan === 'binance') return fromBinance(symbol, interval, limit);
+  if (source === 'chart') return fromChart(symbol, interval, limit);
+  if (source === 'binance') return fromBinance(symbol, interval, limit);
+  if (source === 'yahoo') return fromYahoo(symbol, interval, limit);
 
-  const b = await fromBinance(symbol, interval, limit);
-  if (b.ok) return b;
-  const ch = await fromChart(symbol, interval, limit);
-  if (ch.ok) return { ...ch, binance_indisponible: b.error };
+  const ex = exchangeOf(symbol);
+  const cryptoLikely = ex === null || ex === 'BINANCE';
+  if (cryptoLikely) {
+    const b = await fromBinance(symbol, interval, limit);
+    if (b.ok) return b;
+    var binanceErr = b.error;
+  }
+
+  // Outside crypto the two remaining sources answer different questions:
+  //   'profondeur'  — thousands of bars, possibly from a proxy contract.
+  //                   What a backtest or a volatility statistic needs.
+  //   'exactitude'  — the instrument actually traded, capped at 300 bars.
+  //                   What a price LEVEL needs, since a level from a future
+  //                   sits about 1% away from the same level on spot.
+  const order = prefer === 'profondeur' ? ['yahoo', 'chart'] : ['chart', 'yahoo'];
+  const errs = {};
+  for (const src of order) {
+    const res = src === 'yahoo' ? await fromYahoo(symbol, interval, limit) : await fromChart(symbol, interval, limit);
+    if (res.ok) {
+      if (binanceErr) res.binance_indisponible = binanceErr;
+      res.source_choisie_pour = prefer;
+      if (src === 'chart' && res.n < limit * 0.8) {
+        res.profondeur_limitee = 'Le graphique n a servi que ' + res.n + ' bougies sur ' + limit
+          + ' demandees. Pour un test statistique, demander prefer="profondeur" (source Yahoo, des milliers de bougies)'
+          + (yahooSymbol(symbol) ? '.' : ', mais aucun equivalent Yahoo n est connu pour ce symbole.');
+      }
+      return res;
+    }
+    errs[src] = res.error;
+  }
   return {
     ok: false,
     error: 'aucune source n a pu fournir de bougies pour ' + symbol,
-    binance: b.error,
-    graphique: ch.error,
+    binance: binanceErr,
+    yahoo: errs.yahoo,
+    graphique: errs.chart,
   };
 }
 

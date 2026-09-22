@@ -25,6 +25,8 @@
 
 const UA = { 'User-Agent': 'Mozilla/5.0' };
 
+import { fetchBars } from './bars.js';
+
 const SPOT = 'https://api.binance.com';
 const FUT = 'https://fapi.binance.com';
 
@@ -156,11 +158,31 @@ function normInterval(iv, fallback) {
  * reading down and makes every regime look like a compression. It is split off
  * into `forming` and excluded from every calculation.
  */
-async function fetchKlines(symbol, interval, limit) {
+async function fetchKlines(symbol, interval, limit, originalSymbol) {
   const n = Math.max(50, Math.min(Number(limit) || MAX_KLINES, MAX_KLINES));
   const url = SPOT + '/api/v3/klines?symbol=' + encodeURIComponent(symbol) +
     '&interval=' + interval + '&limit=' + n;
   const res = await getJSON(url);
+
+  // Binance carries crypto only. Gold, indices and currencies fell through here
+  // with "Invalid symbol" and lost the whole regime block — which is the part
+  // that sizes a stop, so its absence is not cosmetic.
+  if (!res.ok || !Array.isArray(res.data) || res.data.length === 0) {
+    const alt = await fetchBars({ symbol: originalSymbol || symbol, interval, limit: n, prefer: 'profondeur' });
+    if (alt.ok) {
+      return {
+        ok: true, symbol, interval,
+        t: alt.t.map(x => x * 1000), o: alt.o, h: alt.h, l: alt.l, c: alt.c, v: alt.v,
+        qv: alt.v.map((vol, i) => vol * alt.c[i]),
+        n: alt.n,
+        source_alternative: alt.source,
+        symbole_source: alt.symbole_source,
+        prix_equivalents: alt.prix_equivalents,
+        equivalence_note: alt.equivalence_note,
+      };
+    }
+    if (!res.ok) return { ok: false, error: res.error + ' | repli: ' + alt.error, symbol };
+  }
   if (!res.ok) return { ok: false, error: res.error, symbol };
   if (!Array.isArray(res.data)) return { ok: false, error: 'reponse klines inattendue', symbol };
   if (res.data.length === 0) return { ok: false, error: 'aucune bougie renvoyee (symbole inexistant sur Binance spot ?)', symbol };
@@ -606,13 +628,27 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
   if (!symbol) throw new Error('symbol est requis, ex: "LINKUSDT" ou "BINANCE:LINKUSDT"');
   const sym = normSymbol(symbol);
   const iv = normInterval(interval, '1d');
-  const period = Number(periods) > 1 ? Math.floor(Number(periods)) : 14;
+  // `periods` is the ATR period here, while analysis_key_levels uses the same
+  // word for a BAR COUNT. Same suite, same word, two meanings — so a caller
+  // passing 2000 gets "ATR(2000) impossible" and no hint as to why. Don't guess
+  // which was meant; name the confusion.
+  const askedPeriod = Number(periods);
+  if (askedPeriod > 200) {
+    return {
+      success: false, symbol: sym, interval: iv,
+      error: 'periods=' + askedPeriod + ' est la PERIODE de l ATR (defaut 14), pas le nombre de bougies. '
+        + 'Pour analyser ' + askedPeriod + ' bougies, passer limit=' + askedPeriod + '. '
+        + 'Attention: analysis_key_levels emploie "periods" dans l autre sens.',
+      parametres: { periods: 'periode de l ATR, defaut 14', limit: 'nombre de bougies a charger, defaut ' + MAX_KLINES },
+    };
+  }
+  const period = askedPeriod > 1 ? Math.floor(askedPeriod) : 14;
   const hz = Number(horizon) > 0 ? Math.floor(Number(horizon)) : 5;
   const targetSurvival = Number(survie_cible) > 0 && Number(survie_cible) < 100 ? Number(survie_cible) : 90;
   const riskPct = Number(risque_pct) > 0 ? Number(risque_pct) : 1;
   const barsPerYear = BARS_PER_YEAR[iv];
 
-  const k = await fetchKlines(sym, iv, limit);
+  const k = await fetchKlines(sym, iv, limit, symbol);
   if (!k.ok) {
     return { success: false, symbol: sym, interval: iv, error: k.error,
       note: 'Rien n a ete calcule. Aucune valeur par defaut n est renvoyee a la place des donnees manquantes.' };
@@ -805,7 +841,9 @@ export async function volatilityRegime({ symbol, interval, periods, limit, horiz
     success: true,
     symbol: sym,
     interval: iv,
-    source: 'binance spot klines',
+    source: k.source_alternative ? k.source_alternative + (k.symbole_source ? ' (' + k.symbole_source + ')' : '') : 'binance spot klines',
+    prix_equivalents: k.prix_equivalents,
+    equivalence_note: k.equivalence_note,
 
     bougies: {
       demandees: k.demandees,

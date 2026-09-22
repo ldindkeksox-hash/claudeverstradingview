@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import * as fib from '../core/fibonacci.js';
 import * as bt from '../core/backtest.js';
+import * as macro from '../core/macro.js';
 
 const jsonResult = (data, isError = false) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
@@ -71,6 +72,34 @@ export function registerStrategyTools(server) {
     },
     async (args) => {
       try { return jsonResult(await bt.findStrategy(args)); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    },
+  );
+
+  server.tool(
+    'analysis_drivers',
+    'What actually moves this asset. For gold: the dollar, US 10-year yields, silver and equities — each with correlation on RETURNS, sample size, t-statistic, beta ("for 1% of DXY, gold moves X%"), and an alert when a usual link is breaking or weakening. Reading gold without its drivers is reading half the chart.',
+    {
+      symbol: z.string().describe('Symbol, e.g. "OANDA:XAUUSD"'),
+      interval: z.string().optional().describe('Default 1d. Daily is the right scale for macro links.'),
+      periods: z.coerce.number().optional().describe('Bars of history (default 400)'),
+      fenetre_courte: z.coerce.number().optional().describe('Recent window used to detect a breaking link (default 30)'),
+    },
+    async (args) => {
+      try { return jsonResult(await macro.drivers(args)); }
+      catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    },
+  );
+
+  server.tool(
+    'analysis_sessions',
+    'Hour-by-hour profile: which hours actually carry the range and which only look like they do. On gold the most active hour moves 2.4x the calmest, so one ATR-based stop is wrong in both directions depending on entry time. Directional bias is reported with a binomial test, never asserted.',
+    {
+      symbol: z.string().describe('Symbol, e.g. "OANDA:XAUUSD"'),
+      periods: z.coerce.number().optional().describe('Hourly bars to profile (default 2000)'),
+    },
+    async (args) => {
+      try { return jsonResult(await macro.sessionProfile(args)); }
       catch (err) { return jsonResult({ success: false, error: err.message }, true); }
     },
   );

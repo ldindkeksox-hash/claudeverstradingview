@@ -255,7 +255,9 @@ export async function backtest({
   const iv = normalizeInterval(interval);
   // _bars lets a caller running many tests fetch once. Without it, findStrategy's
   // grid would swap the chart symbol back and forth 16 times for one answer.
-  const bars = _bars || await fetchBars({ symbol, interval, limit: periods });
+  // A backtest needs sample size above all: percentage moves and R-multiples
+  // transfer between a future and its spot, so depth beats price exactness here.
+  const bars = _bars || await fetchBars({ symbol, interval, limit: periods, prefer: 'profondeur' });
   if (!bars.ok) return { success: false, symbol, interval: iv.tv || interval, error: bars.error, binance: bars.binance, graphique: bars.graphique };
 
   const c = toCandles(bars);
@@ -353,9 +355,9 @@ export async function findStrategy({ symbol, interval = '1h', periods = 1000, se
   ];
   // One fetch for the whole grid: on a non-Binance symbol every fetch swaps the
   // displayed chart, and 16 swaps to answer one question is not acceptable.
-  const bars = await fetchBars({ symbol, interval, limit: periods });
+  const bars = await fetchBars({ symbol, interval, limit: periods, prefer: 'profondeur' });
   if (!bars.ok) {
-    return { success: false, symbol, interval, error: bars.error, binance: bars.binance, graphique: bars.graphique };
+    return { success: false, symbol, interval, error: bars.error, binance: bars.binance, yahoo: bars.yahoo, graphique: bars.graphique };
   }
   const manque = periods - bars.n;
   const tronque = manque > periods * 0.2;
