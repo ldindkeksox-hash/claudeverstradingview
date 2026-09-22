@@ -1,38 +1,68 @@
 # TradingView MCP — Claude Instructions
 
-99 tools for reading and controlling a live TradingView chart via CDP (port 9222).
+101 tools for reading and controlling a live TradingView chart via CDP (port 9222).
 
 ## Data source — read this before any analysis tool
 
-Analysis tools do **not** all cover the same instruments. Getting this wrong wastes a whole
-analysis pass on `Invalid symbol`.
+Three sources sit behind the analysis tools, and they answer different questions.
 
-| Tool | Crypto (Binance) | Gold, forex, indices, stocks |
-|------|------------------|------------------------------|
-| `analysis_fibonacci`, `strategy_backtest`, `strategy_find` | yes | **yes** — falls back to the chart's series |
-| `analysis_key_levels` | yes | **yes** — falls back to the chart's series |
-| `analysis_volatility_regime`, `analysis_relative_strength` | yes | **no** — Binance klines only |
-| `market_positioning`, `market_orderbook` | yes | **no** — funding, open interest and depth are Binance-specific |
+| Source | Depth | Prices | Used for |
+|--------|-------|--------|----------|
+| **binance** | 1000 bars | exact | crypto pairs |
+| **yahoo** | ~14 500 hourly bars (2 y) | exact, **except proxies** | depth: backtests, volatility, correlations |
+| **chart** | **capped at 300 bars** | the traded instrument | price levels on non-crypto |
+
+The 300-bar chart cap is hard: `setVisibleTimeRange` throws *Not implemented* and
+`scrollChartByBar` does not grow the series. Never run a backtest off the chart source — it
+produces single-digit trade counts, and three losses out of ten reach |t| = 3.
+
+**Proxies.** Gold maps to `GC=F` (COMEX future), which sits ~1 % above spot; silver and oil are
+futures too. Percentage moves, volatility and R-multiples transfer; **absolute price levels do
+not**. Results carry `prix_equivalents: false` and an `equivalence_note` — quote a level from a
+proxy and it will be ~1 % off the price being traded.
+
+| Tool | Crypto | Gold, forex, indices, stocks |
+|------|--------|------------------------------|
+| `analysis_key_levels` | yes | yes — chart (exact prices, 300 bars) |
+| `analysis_fibonacci` | yes | yes |
+| `analysis_volatility_regime` | yes | yes — Yahoo depth |
+| `strategy_backtest`, `strategy_find` | yes | yes — Yahoo depth |
+| `analysis_drivers`, `analysis_sessions` | yes | yes — Yahoo depth |
+| `analysis_relative_strength` | yes | **no** — Binance klines only |
+| `market_positioning`, `market_orderbook` | yes | **no** — funding, OI and depth are Binance-specific |
 | `market_technicals`, `market_breadth` | yes | **no** — crypto-scoped scanner |
-| `data_get_ohlcv`, `data_get_study_values`, `quote_get`, `market_news`, `market_calendar` | yes | yes — these read the chart |
+| `data_get_ohlcv`, `data_get_study_values`, `quote_get`, `market_news`, `market_calendar` | yes | yes — read the chart |
 
-The chart fallback **swaps the displayed symbol and resolution, then restores them**. It is a
-side effect on the user's view, and `source` in every result says which path answered
-(`binance` or `chart`/`tradingview:chart`). A chart-sourced feed may carry no volume — when it
-does not, POC, value area and VWAP are unavailable and the result says so rather than computing
-them on zeros.
+The chart path **swaps the displayed symbol and resolution, then restores them** in a `finally`.
+It is a side effect on the user's view, so prefer Yahoo whenever price exactness is not required.
 
 `quote_get` reads the ACTIVE CHART's bars. Passing a symbol that is not the chart's returns
 `success: false` naming both — call `chart_set_symbol` first.
+
+## Argument trap
+
+`periods` means **two different things** across this suite:
+
+- `analysis_key_levels`, `analysis_fibonacci`, `strategy_*` → **number of bars**
+- `analysis_volatility_regime` → **the ATR period** (bars are `limit`)
+
+Passing `periods: 2000` to the regime tool now returns an error naming the confusion instead of
+"ATR(2000) impossible".
 
 ## Analysis discipline
 
 - A backtest result without its sample size is worthless. `strategy_backtest` returns `t_stat`
   and a random-entry control; under 30 trades or |t| < 2, report it as unproven, never as an edge.
+- Check `historique_tronque` before reading any backtest. A 70 %-truncated window is an absence
+  of data, not an absence of edge.
 - `strategy_find` tries 16 combinations. Keeping the best of 16 invents edges out of noise — its
   `mise_en_garde` states the expected number of false positives. Pass it on to the user.
 - A Fibonacci ratio has no power in itself. Quote `taux_respect` and `touches` from
   `analysis_fibonacci`, not the ratio.
+- On gold, run `analysis_drivers` before arguing a direction from the chart. Gold moves −1.66 %
+  per 1 % of DXY; a long argued from support while the dollar is bid is half an analysis.
+- `analysis_sessions` before sizing an intraday stop: the most active hour carries 2.4x the
+  quietest, so one ATR-derived stop is wrong in both directions.
 
 ## Decision Tree — Which Tool When
 
