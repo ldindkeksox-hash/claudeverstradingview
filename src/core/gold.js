@@ -73,6 +73,7 @@ function atrSeries(c, period = 14) {
 export async function orderBlocks({
   symbol = 'OANDA:XAUUSD', interval = '5m', periods = 2000,
   impulsion_atr = 2, impulsion_bougies = 5, zone = 'corps', reaction_atr = 1, max_blocs = 12,
+  spread = 0.25,
 } = {}) {
   const bars = await fetchBars({ symbol, interval, limit: periods, prefer: 'profondeur' });
   if (!bars.ok) return { success: false, symbol, interval, error: bars.error, yahoo: bars.yahoo, graphique: bars.graphique };
@@ -131,19 +132,22 @@ export async function orderBlocks({
         const fin = Math.min(c.length - 1, k + 40);
         let best = 0;
         reaction = false;
+        var sortieIdx = fin;
         for (let j = k; j <= fin; j++) {
           const mv = vente ? entree - c[j].low : c[j].high - entree;
           if (mv > best) best = mv;
           const touchStop = vente ? c[j].high >= stopPx : c[j].low <= stopPx;
           const touchCible = vente ? c[j].low <= cible : c[j].high >= cible;
-          if (touchStop) { reaction = false; break; }
-          if (touchCible) { reaction = true; break; }
+          if (touchStop) { reaction = false; sortieIdx = j; break; }
+          if (touchCible) { reaction = true; sortieIdx = j; break; }
         }
         excursion = best;
+        var dureeBougies = sortieIdx - k;
         // The stop must clear the whole zone plus the buffer, so the real
         // reward:risk of this setup is NOT reaction_atr — it is that divided by
         // the zone thickness. A win rate without its R says nothing about money.
         var risqueTest = Math.abs(stopPx - entree) / a;
+        var risquePrix = Math.abs(stopPx - entree);
         var Rtest = risqueTest > 0 ? reaction_atr / risqueTest : null;
         break;
       }
@@ -160,7 +164,10 @@ export async function orderBlocks({
       bougies_avant_test: visiteIdx == null ? null : c.length - 1 - visiteIdx,
       a_reagi: visiteIdx == null ? null : reaction,
       risque_atr: visiteIdx == null ? null : r(risqueTest, 2),
+      risque_prix: visiteIdx == null ? null : r(risquePrix, 3),
       R_du_test: visiteIdx == null ? null : r(Rtest, 2),
+      duree_bougies: visiteIdx == null ? null : dureeBougies,
+      _entree_idx: visiteIdx, _sortie_idx: visiteIdx == null ? null : sortieIdx,
       excursion_apres_test: visiteIdx == null ? null : r(excursion),
       excursion_atr: visiteIdx == null ? null : r(excursion / a, 2),
       intact: visiteIdx == null,
@@ -182,6 +189,51 @@ export async function orderBlocks({
   const Rmoy = Rs.length ? Rs.reduce((s, x) => s + x, 0) / Rs.length : null;
   const seuil = Rmoy != null ? 1 / (1 + Rmoy) : null;
   const esperance = Rmoy != null && taux != null ? taux * Rmoy - (1 - taux) : null;
+
+  // Expectancy PER TRADE is only half the answer. A setup earning less per trade
+  // but firing four times as often can return more per week, which is exactly
+  // why scalpers work on M5 rather than the hourly. So: how long is a trade
+  // held, how often does it appear, and what does that add up to over a week.
+  const secParBougie = c.length > 1 ? (c[c.length - 1].time - c[0].time) / (c.length - 1) : null;
+  const durees = testes.map(b => b.duree_bougies).filter(x => x != null);
+  const dureeMoy = durees.length ? durees.reduce((s, x) => s + x, 0) / durees.length : null;
+  const dureeGagnants = reussis.map(b => b.duree_bougies).filter(x => x != null);
+  const dureePerdants = testes.filter(b => !b.a_reagi).map(b => b.duree_bougies).filter(x => x != null);
+  const moyOf = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
+  const spanJours = secParBougie ? (c[c.length - 1].time - c[0].time) / 86400 : null;
+  const tradesParSemaine = spanJours > 0 ? n / spanJours * 7 : null;
+
+  // Costs decide everything at this frequency, and leaving them out is how a
+  // scalping backtest produces 36 R a week. The stop distance IS the risk unit,
+  // so one round-trip spread costs spread/risk in R — on a 5-minute setup whose
+  // stop is a couple of points wide, that is a fifth of the edge or more.
+  const risquesPrix = testes.map(b => b.risque_prix).filter(x => x != null && x > 0);
+  const risqueMoyPrix = risquesPrix.length ? risquesPrix.reduce((s, x) => s + x, 0) / risquesPrix.length : null;
+  const coutR = risqueMoyPrix > 0 ? spread / risqueMoyPrix : null;
+  const espNette = esperance != null && coutR != null ? esperance - coutR : esperance;
+  const espBruteParSemaine = esperance != null && tradesParSemaine != null ? esperance * tradesParSemaine : null;
+
+  // Overlap. Several zones forming inside one impulse are all hit by the same
+  // pullback: that is ONE trade for a person holding one position, not five.
+  // Counting them separately inflates the sample (so z-scores look significant
+  // on data that is not independent) and multiplies a weekly return nobody
+  // could take. The sequential subset is what one position at a time gives.
+  const chrono = testes.filter(b => b._entree_idx != null).sort((a, b) => a._entree_idx - b._entree_idx);
+  const sequentiels = [];
+  let libreA = -1;
+  for (const b of chrono) {
+    if (b._entree_idx > libreA) { sequentiels.push(b); libreA = b._sortie_idx; }
+  }
+  const nSeq = sequentiels.length;
+  const gagnesSeq = sequentiels.filter(b => b.a_reagi).length;
+  const tauxSeq = nSeq ? gagnesSeq / nSeq : null;
+  const RsSeq = sequentiels.map(b => b.R_du_test).filter(x => x != null && x > 0);
+  const RmoySeq = RsSeq.length ? RsSeq.reduce((s, x) => s + x, 0) / RsSeq.length : null;
+  const espSeqBrute = RmoySeq != null && tauxSeq != null ? tauxSeq * RmoySeq - (1 - tauxSeq) : null;
+  const espSeqNette = espSeqBrute != null && coutR != null ? espSeqBrute - coutR : espSeqBrute;
+  const tradesSeqParSemaine = spanJours > 0 ? nSeq / spanJours * 7 : null;
+  const espParSemaine = espSeqNette != null && tradesSeqParSemaine != null ? espSeqNette * tradesSeqParSemaine : null;
+  const zSeq = nSeq >= 20 ? (gagnesSeq - nSeq / 2) / Math.sqrt(nSeq / 4) : null;
 
   const intacts = blocs.filter(b => b.intact).sort((a, b) => Math.abs(a.distance_pct) - Math.abs(b.distance_pct));
 
@@ -205,6 +257,45 @@ export async function orderBlocks({
       seuil_rentabilite_pct: seuil == null ? null : r(seuil * 100, 1),
       esperance_R_par_trade: r(esperance, 3),
       rentable: esperance != null ? esperance > 0 : null,
+      frais: {
+        spread_utilise: spread,
+        risque_moyen_en_points: r(risqueMoyPrix, 2),
+        cout_aller_retour_R: r(coutR, 3),
+        esperance_brute_R: r(esperance, 3),
+        esperance_nette_R: r(espNette, 3),
+        survit_aux_frais: espNette != null ? espNette > 0 : null,
+        note: 'Le spread est paye a chaque aller-retour et se compare au RISQUE du trade, pas au prix. '
+          + 'Sur un stop de ' + r(risqueMoyPrix, 2) + ' points, un spread de ' + spread + ' coute ' + r(coutR * 100, 1) + '% du risque, '
+          + 'a chaque trade. C est ce qui tue la plupart des strategies a haute frequence, et c est invisible tant qu on ne le chiffre pas.',
+      },
+      sequentiel: {
+        trades_si_une_position_a_la_fois: nSeq,
+        sur_signaux_bruts: n,
+        part_retenue_pct: n ? r(nSeq / n * 100, 1) : null,
+        taux_reussite_pct: tauxSeq == null ? null : r(tauxSeq * 100, 1),
+        R_moyen: r(RmoySeq, 2),
+        z: r(zSeq, 2),
+        significatif: zSeq != null && Math.abs(zSeq) >= 2,
+        esperance_R_par_trade: r(espSeqNette, 3),
+        trades_par_semaine: r(tradesSeqParSemaine, 1),
+        note: 'Seuls ces trades-la sont prenables par quelqu un qui detient UNE position a la fois. '
+          + 'Les ' + (n - nSeq) + ' autres chevauchent un trade deja ouvert: les compter separement gonfle '
+          + 'l echantillon (donc le z) et promet un rendement hebdomadaire que personne ne peut prendre.',
+      },
+      cadence: {
+        fenetre_jours: r(spanJours, 1),
+        trades_par_semaine_bruts: r(tradesParSemaine, 1),
+        esperance_R_par_semaine_brute_signaux: r(espBruteParSemaine, 2),
+        esperance_R_par_semaine: r(espParSemaine, 2),
+        base: 'esperance_R_par_semaine est calculee sur les trades SEQUENTIELS nets de frais — le seul chiffre reellement atteignable.',
+        duree_moyenne_bougies: r(dureeMoy, 1),
+        duree_moyenne_minutes: secParBougie && dureeMoy != null ? r(dureeMoy * secParBougie / 60, 1) : null,
+        duree_gagnants_minutes: secParBougie && moyOf(dureeGagnants) != null ? r(moyOf(dureeGagnants) * secParBougie / 60, 1) : null,
+        duree_perdants_minutes: secParBougie && moyOf(dureePerdants) != null ? r(moyOf(dureePerdants) * secParBougie / 60, 1) : null,
+        note: 'L esperance par SEMAINE est le chiffre qui compte pour comparer deux unites de temps. '
+          + 'Une unite courte qui gagne moins par trade peut rapporter davantage si elle se declenche bien plus souvent — '
+          + 'c est la raison d etre du scalping, et c est invisible quand on ne regarde que l esperance par trade.',
+      },
       verdict: n < 20
         ? 'Seulement ' + n + ' blocs testes: pas assez pour juger. Allonger la fenetre avant de conclure.'
         : [
@@ -216,6 +307,18 @@ export async function orderBlocks({
             ? 'RENTABLE sur cette fenetre: esperance ' + r(esperance, 3) + ' R par trade.'
             : 'PERDANT sur cette fenetre: esperance ' + r(esperance, 3) + ' R par trade. Le taux de reussite est flatteur, le rapport gain/risque le mange.',
         ].join(' '),
+    },
+    realisme: {
+      avertissement: 'Le SENS de ce resultat est plus solide que son AMPLITUDE. Un R par semaine a deux chiffres ne se reproduira pas en reel.',
+      ce_qui_reste_optimiste: [
+        'Execution parfaite: fill a la limite au bord de zone a chaque fois, sans fill partiel ni zone sautee.',
+        'Aucun glissement sur les stops. L or decroche sur les chiffres macro, et un stop de ' + r(risqueMoyPrix, 1) + ' points s y franchit sans s arreter.',
+        'Seul le spread est facture. Une commission au lot (souvent 5 a 7 $ l aller-retour) s ajouterait a chaque trade.',
+        'Presence humaine totale: ' + r((tradesSeqParSemaine || 0) / 5, 0) + ' trades par jour ouvre a saisir sans en manquer un.',
+        'Une seule fenetre de ' + r(spanJours, 0) + ' jours, donc un seul regime de marche.',
+        'Les parametres de zone ont ete choisis apres avoir vu les donnees. Le biais de selection gonfle toujours le resultat retenu.',
+      ],
+      a_faire_avant_d_y_croire: 'Reverifier sur une autre periode et un autre actif, puis en demo avec les frais reels du courtier.',
     },
     zones_intactes: intacts.slice(0, max_blocs),
     zone_la_plus_proche: intacts[0] || null,
