@@ -80,6 +80,22 @@ export async function orderBlocks({
   const c = toCandles(bars);
   if (c.length < 100) return { success: false, symbol, error: 'seulement ' + c.length + ' bougies.' };
 
+  // When the depth source is a proxy, its PRICES are not the traded
+  // instrument's: gold futures sit ~35 points above spot, which is seven M5
+  // ATRs. Warning about it is not enough — a zone is a price you put an order
+  // on, so it has to be converted or it is actively dangerous. Read the real
+  // instrument's last price and carry a conversion factor.
+  let facteurSpot = null, prixReel = null;
+  if (bars.prix_equivalents === false) {
+    const reel = await fetchBars({ symbol, interval: '1h', limit: 60, source: 'chart' });
+    if (reel.ok && reel.n > 0) {
+      prixReel = reel.c[reel.n - 1];
+      const proxy = c[c.length - 1].close;
+      if (proxy > 0 && prixReel > 0) facteurSpot = prixReel / proxy;
+    }
+  }
+  const versReel = (p) => (facteurSpot == null || p == null ? null : Math.round(p * facteurSpot * 100) / 100);
+
   const atr = atrSeries(c);
   const px = c[c.length - 1].close;
   const blocs = [];
@@ -156,6 +172,10 @@ export async function orderBlocks({
     blocs.push({
       sens, type_zone: sens === 'vente' ? 'zone de vente (OB baissier)' : 'zone d achat (OB haussier)',
       haut: r(hi), bas: r(lo), milieu: r((hi + lo) / 2),
+      // The only prices an order may be placed at when the source is a proxy.
+      haut_reel: versReel(hi), bas_reel: versReel(lo), milieu_reel: versReel((hi + lo) / 2),
+      // Proximal edge: the side price reaches first, hence where a limit fills.
+      entree_reelle: versReel(sens === 'vente' ? lo : hi),
       epaisseur: r(hi - lo), epaisseur_atr: r((hi - lo) / a, 2),
       impulsion_atr: r(sens === 'vente' ? chute : hausse, 1),
       bougies_avant: c.length - 1 - i,
@@ -242,7 +262,19 @@ export async function orderBlocks({
     symbol, interval: bars.interval, source: bars.source + (bars.symbole_source ? ' (' + bars.symbole_source + ')' : ''),
     prix_equivalents: bars.prix_equivalents,
     equivalence_note: bars.equivalence_note,
-    bougies: c.length, prix_actuel: r(px),
+    bougies: c.length,
+    prix_actuel: r(px),
+    conversion_prix: facteurSpot == null
+      ? (bars.prix_equivalents === false
+        ? { disponible: false, danger: 'La source est un proxy et le prix reel n a PAS pu etre lu: les zones ci-dessous sont en prix ' + (bars.symbole_source || 'proxy') + '. NE PAS y placer d ordre sans les convertir soi-meme.' }
+        : undefined)
+      : {
+        prix_proxy: r(px), prix_reel: r(prixReel), symbole_proxy: bars.symbole_source,
+        facteur: Math.round(facteurSpot * 1e6) / 1e6,
+        ecart_points: r(prixReel - px), ecart_pct: r((prixReel - px) / px * 100, 3),
+        note: 'Les champs *_reel et entree_reelle sont deja convertis: ce sont les SEULS a utiliser pour passer un ordre. '
+          + 'Les champs haut/bas/milieu restent en prix ' + bars.symbole_source + ', soit ' + r(prixReel - px) + ' points d ecart.',
+      },
     parametres: { impulsion_atr, impulsion_bougies, zone, reaction_atr,
       definition: 'Zone de vente = derniere bougie HAUSSIERE avant une chute d au moins ' + impulsion_atr + ' ATR en ' + impulsion_bougies + ' bougies. '
         + 'Reaction comptee si le prix s eloigne d au moins ' + reaction_atr + ' ATR SANS traverser la zone.' },
