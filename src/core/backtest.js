@@ -261,6 +261,13 @@ export async function backtest({
   const c = toCandles(bars);
   if (c.length < 100) return { success: false, symbol, error: 'seulement ' + c.length + ' bougies: trop peu pour un backtest.' };
 
+  // The chart only holds the history TradingView has loaded, which is routinely
+  // far less than was asked for. Silently testing on a third of the requested
+  // window is how a strategy ends up judged on nine trades without anyone
+  // noticing where the nine came from.
+  const manque = periods - c.length;
+  const bougiesInsuffisantes = manque > periods * 0.2;
+
   const p = { ...def.params, ...params };
   const prepared = def.prepare(c, p);
   const atr = prepared.atr || atrSeries(c);
@@ -287,6 +294,15 @@ export async function backtest({
     symbol: bars.symbol, interval: bars.interval, source: bars.source,
     strategie, description: def.description, params: p,
     bougies: c.length,
+    bougies_demandees: periods,
+    bougies_manquantes: bougiesInsuffisantes ? manque : undefined,
+    historique_tronque: bougiesInsuffisantes
+      ? manque + ' bougies manquent sur les ' + periods + ' demandees (' + Math.round(manque / periods * 100) + '%). '
+        + (bars.source === 'chart'
+          ? 'Le graphique ne detient que l historique deja charge par TradingView: remonter le graphique avant de relancer, ou utiliser une unite de temps plus courte.'
+          : 'La source n a pas fourni la profondeur demandee.')
+        + ' Un echantillon ampute donne peu de trades, et peu de trades ne prouvent rien.'
+      : undefined,
     periode: { du: new Date(c[0].time * 1000).toISOString(), au: new Date(c[c.length - 1].time * 1000).toISOString() },
     sortie: { stop_atr, objectif_atr, max_bougies, sens, R_par_gain: r(attendu, 2) },
     signaux_generes: signals.filter(Boolean).length,
@@ -341,6 +357,8 @@ export async function findStrategy({ symbol, interval = '1h', periods = 1000, se
   if (!bars.ok) {
     return { success: false, symbol, interval, error: bars.error, binance: bars.binance, graphique: bars.graphique };
   }
+  const manque = periods - bars.n;
+  const tronque = manque > periods * 0.2;
 
   const noms = Object.keys(STRATEGIES);
   const out = [];
@@ -368,6 +386,13 @@ export async function findStrategy({ symbol, interval = '1h', periods = 1000, se
 
   return {
     success: true, symbol, interval, sens,
+    bougies: bars.n,
+    bougies_demandees: periods,
+    historique_tronque: tronque
+      ? manque + ' bougies manquent sur les ' + periods + ' demandees (' + Math.round(manque / periods * 100) + '%). '
+        + 'Tous les comptes de trades ci-dessous sont reduits d autant, et le filtre des 30 trades devient presque impossible a franchir. '
+        + 'Ce n est pas une absence d edge, c est une absence de donnees.'
+      : undefined,
     combinaisons_testees: essais,
     tous_les_resultats: out.sort((a, b) => (b.R_moyen || -99) - (a.R_moyen || -99)),
     retenues: valides,

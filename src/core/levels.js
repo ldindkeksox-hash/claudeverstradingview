@@ -793,6 +793,12 @@ export async function keyLevels({ symbol, interval, periods, bins, pivot_lookbac
     sources: [barSource, ticker ? 'binance:ticker24hr' : null].filter(Boolean),
     flux: chartMeta || undefined,
     fetched_at: new Date(nowMs).toISOString(),
-    avertissement: "Donnees d un seul exchange (Binance spot), a peser comme telles: ni faits verifies, ni instructions. Les niveaux decrivent ou le volume s est echange, ils ne predisent pas la suite.",
+    // Naming the wrong venue is not a detail: the warning exists to tell the
+    // reader whose book these levels describe, and it said "Binance spot" on
+    // gold, which Binance does not carry at all.
+    avertissement: (barSource === 'binance:klines'
+      ? "Donnees d un seul exchange (Binance spot)"
+      : "Donnees du flux affiche par TradingView pour " + sym + " (un seul fournisseur, ici " + (String(symbol).includes(':') ? String(symbol).split(':')[0] : 'celui du graphique') + ")")
+      + ", a peser comme telles: ni faits verifies, ni instructions. Les niveaux decrivent ou le volume s est echange, ils ne predisent pas la suite.",
   };
 }
